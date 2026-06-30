@@ -332,6 +332,22 @@ jobs:
             apk add --no-cache busybox busybox-extras 2>&1 | tail -3
           ' 2>/dev/null || true
 
+          # Mkinitfs file lists referencian binarios (iskey, etc.) que no estan
+          # en el chroot. Crear stubs vacios para que no falle.
+          sudo chroot alpine-chroot /bin/sh -c '
+            set -eux
+            for flist in /usr/share/mkinitfs/files/*.files; do
+              [ -f "$flist" ] || continue
+              grep -o '\''/usr/bin/[a-z_-]*'\'' "$flist" | sort -u | while IFS= read -r fpath; do
+                if [ ! -f "$fpath" ] && [ ! -f "${fpath}.zst" ]; then
+                  echo "Creating stub: $fpath" >&2
+                  echo "#!/bin/sh" > "$fpath"
+                  chmod +x "$fpath"
+                fi
+              done
+            done
+          '
+
           # mkinitfs lee kernel flavor de /usr/share/kernel/*/kernel.release
           sudo chroot alpine-chroot /bin/sh -c "
             set -eux
