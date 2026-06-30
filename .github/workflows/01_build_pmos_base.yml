@@ -89,6 +89,12 @@ jobs:
             }
           done
 
+          # boot-deploy (needed by mkinitfs to copy initramfs from staging to /boot/)
+          echo "Downloading boot-deploy..."
+          BD_VER=$(grep_ver "boot-deploy")
+          echo "boot-deploy version: $BD_VER"
+          [ -z "$BD_VER" ] || wget -q "$PMOS_MIRROR/boot-deploy-${BD_VER}.apk" -O pmos-pkgs/boot-deploy.apk 2>/dev/null ||             echo "⚠️ Could not download boot-deploy"
+
           # Firmware (qcom specific)
           echo "Downloading firmware-qcom..."
           wget -q "$PMOS_MIRROR/firmware-qcom-sm7150-6.0.2-r0.apk" -O pmos-pkgs/firmware-qcom.apk 2>/dev/null || \
@@ -263,8 +269,17 @@ jobs:
             fi
           done
 
-          # Asegurar mkinitfs
+          # Asegurar mkinitfs + boot-deploy
           sudo chmod +x alpine-chroot/usr/sbin/mkinitfs 2>/dev/null || true
+          # boot-deploy: si existe en pmos-root, copiarlo al chroot
+          if [ -f pmos-root/usr/sbin/boot-deploy ]; then
+            sudo cp pmos-root/usr/sbin/boot-deploy alpine-chroot/usr/sbin/boot-deploy
+            sudo chmod +x alpine-chroot/usr/sbin/boot-deploy
+            echo "✅ boot-deploy: $(ls -lh alpine-chroot/usr/sbin/boot-deploy | awk '{print $5}')"
+          else
+            echo "⚠️ boot-deploy binary not found in pmos-root"
+            find pmos-root -name "boot-deploy" -type f 2>/dev/null || true
+          fi
 
           # Asegurar deviceinfo
           DI_SRC="pmos-root/usr/share/deviceinfo/device-xiaomi-laurel"
