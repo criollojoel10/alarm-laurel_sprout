@@ -33,19 +33,16 @@ def main():
         kernel_path = tmp_kernel
         print(f"DTB appended: {os.path.getsize(kernel)} -> {os.path.getsize(tmp_kernel)}")
 
-    # Asegurar mkbootimg via apt (incluye python3-gki para evitar gki import error)
+    # Asegurar mkbootimg via apt
     if not shutil.which('mkbootimg'):
         print('Installing mkbootimg via apt...')
         result = subprocess.run(
-            ['sudo', 'apt-get', 'install', '-y', '-qq', 'mkbootimg', 'python3-gki'],
+            ['sudo', 'apt-get', 'install', '-y', '-qq', 'mkbootimg'],
             capture_output=True, text=True)
         print(result.stdout[:300] if result.stdout else result.stderr[:300])
         if result.returncode != 0:
-            print('apt failed, trying pip...')
-            r2 = subprocess.run(
-                ['pip3', 'install', 'mkbootimg', '--break-system-packages'],
-                capture_output=True, text=True)
-            print(r2.stdout[:200] if r2.stdout else r2.stderr[:200])
+            print('ERROR: apt install mkbootimg failed')
+            sys.exit(1)
 
     if not shutil.which('mkbootimg'):
         print('ERROR: mkbootimg not available')

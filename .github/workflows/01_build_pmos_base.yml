@@ -350,7 +350,12 @@ jobs:
                 [ -n "$fpath" ] || continue
 
                 if [ ! -e "$fpath" ] && [ ! -e "${fpath}.zst" ]; then
+                  # Path termina con / -> es directorio
                   case "$fpath" in
+                    */)
+                      echo "Creating directory: $fpath" >&2
+                      mkdir -p "$fpath"
+                      ;;
                     /usr/share/misc/source_deviceinfo)
                       echo "FATAL: $fpath missing" >&2
                       exit 10
