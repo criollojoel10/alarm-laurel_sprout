@@ -25,7 +25,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            wget xz-utils zstd cpio python3 \
+            wget xz-utils zstd cpio python3 python3-pip \
             qemu-user-static binfmt-support \
             --no-install-recommends
 
@@ -244,88 +244,60 @@ jobs:
 
       - name: Copy pmOS binaries into Alpine chroot
         run: |
-          # Fix #2: No usamos 'apk add' porque el mirror pmOS no es repo Alpine válido.
-          # Copiamos mkinitfs + assets desde pmos-root (ya extraídos) directamente al chroot.
+          # No usamos 'apk add' (mirror pmOS no es repo Alpine valido).
+          # Copiamos mkinitfs + assets desde pmos-root directamente al chroot.
 
-          # Binario mkinitfs
-          if [ -f pmos-root/usr/sbin/mkinitfs ]; then
-            sudo cp pmos-root/usr/sbin/mkinitfs alpine-chroot/usr/sbin/mkinitfs
-            sudo chmod 755 alpine-chroot/usr/sbin/mkinitfs
-            echo "✅ mkinitfs copied"
-          fi
+          # mkinitfs binario
+          sudo cp -a pmos-root/usr/sbin/mkinitfs alpine-chroot/usr/sbin/mkinitfs
+          sudo chmod +x alpine-chroot/usr/sbin/mkinitfs
 
-          # Assets mkinitfs (files, dirs, modules lists)
-          if [ -d pmos-root/usr/share/mkinitfs ]; then
-            sudo cp -r pmos-root/usr/share/mkinitfs/* alpine-chroot/usr/share/mkinitfs/ 2>/dev/null || true
-            echo "✅ mkinitfs assets copied"
-          fi
+          # Assets (initramfs, mkinitfs, deviceinfo shares)
+          sudo mkdir -p alpine-chroot/usr/share
+          for dir in initramfs mkinitfs postmarketos-mkinitfs; do
+            [ -d "pmos-root/usr/share/$dir" ] && sudo cp -a "pmos-root/usr/share/$dir/." "alpine-chroot/usr/share/$dir/" 2>/dev/null || true
+          done
 
-          # Initramfs scripts (init.sh, init_functions.sh, etc.)
-          if [ -d pmos-root/usr/share/initramfs ]; then
-            sudo cp -r pmos-root/usr/share/initramfs/* alpine-chroot/usr/share/initramfs/ 2>/dev/null || true
-            echo "✅ initramfs scripts copied"
-          fi
-
-          # postmarketos-mkinitfs custom hooks
-          if [ -d pmos-root/usr/share/postmarketos-mkinitfs ]; then
-            sudo mkdir -p alpine-chroot/usr/share/postmarketos-mkinitfs
-            sudo cp -r pmos-root/usr/share/postmarketos-mkinitfs/* alpine-chroot/usr/share/postmarketos-mkinitfs/ 2>/dev/null || true
-            echo "✅ pmOS mkinitfs hooks copied"
-          fi
-
-          # Copiar deviceinfo al chroot
+          # Device info
           DI_FILE=$(find pmos-root -name "deviceinfo" -type f 2>/dev/null | head -1)
           if [ -n "$DI_FILE" ]; then
             sudo mkdir -p alpine-chroot/etc/deviceinfo
             sudo cp "$DI_FILE" alpine-chroot/etc/deviceinfo/
-            sudo cp "$DI_FILE" alpine-chroot/tmp/deviceinfo 2>/dev/null || true
-            echo "✅ deviceinfo copied"
           fi
 
-          # Copiar módulos del kernel al chroot
-          if [ -d pmos-root/lib/modules ]; then
-            sudo cp -r pmos-root/lib/modules/* alpine-chroot/lib/modules/ 2>/dev/null || true
-            echo "✅ modules copied"
+          # Kernel modules — preservar estructura 6.1.0-sm6125/
+          sudo mkdir -p alpine-chroot/lib/modules
+          sudo rm -rf alpine-chroot/lib/modules/*
+          if [ -d pmos-root/lib/modules ] && [ -n "$(ls pmos-root/lib/modules/)" ]; then
+            sudo cp -a pmos-root/lib/modules/. alpine-chroot/lib/modules/
           fi
 
-          echo "=== mkinitfs check in chroot ==="
-          sudo chroot alpine-chroot /bin/sh -c '
-            echo -n "mkinitfs: "
-            command -v mkinitfs || echo "MISSING"
-            mkinitfs --version 2>&1 || true
-          '
-          echo "=== /lib/modules in chroot ==="
-          sudo ls -la /lib/modules/ 2>/dev/null || echo "(none)"
-          ls alpine-chroot/lib/modules/ 2>/dev/null || echo "(none)"
+          # Validar
+          echo "=== mkinitfs check ==="
+          sudo chroot alpine-chroot /bin/sh -c 'command -v mkinitfs && mkinitfs --version || echo "MISSING"'
+          echo "=== modules tree ==="
+          find alpine-chroot/lib/modules -maxdepth 2 -type d 2>/dev/null | sort || echo "(none)"
 
       - name: Generate initramfs
         run: |
-          KVER=$(ls pmos-root/lib/modules/ 2>/dev/null | head -1)
-          [ -z "$KVER" ] && KVER=$(ls alpine-chroot/lib/modules/ 2>/dev/null | head -1)
+          KVER=$(find pmos-root/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -1)
+          [ -z "$KVER" ] && KVER=$(find alpine-chroot/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -1)
           echo "KVER=$KVER"
-          [ -z "$KVER" ] && { echo "No kernel version"; exit 1; }
+          [ -z "$KVER" ] && { echo "ERROR: no kernel version found"; exit 1; }
 
-          sudo mkdir -p alpine-chroot/etc/mkinitfs
-          echo 'features="ata base cdrom cryptsetup ext4 kms mmc nvme raid scsi serial squashfs usb virtio"' | sudo tee alpine-chroot/etc/mkinitfs/mkinitfs.conf > /dev/null
+          sudo mkdir -p alpine-chroot/boot alpine-chroot/etc/mkinitfs
+          echo 'features="base ext4 mmc scsi usb kms"' | sudo tee alpine-chroot/etc/mkinitfs/mkinitfs.conf > /dev/null
 
-          # Generate initramfs
+          # Generate initramfs with set -e for early failure
           sudo chroot alpine-chroot /bin/sh -c "
-            echo 'Modules:'
-            ls /lib/modules/
-            mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o /boot/initramfs-laurel $KVER 2>&1 || {
-              echo 'Trying default config...'
-              mkinitfs -o /boot/initramfs-laurel $KVER 2>&1
-            }
-            ls -lh /boot/initramfs-laurel || echo 'initramfs not generated'
+            set -eux
+            command -v mkinitfs
+            ls -la /lib/modules/$KVER
+            mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o /boot/initramfs-laurel $KVER
+            ls -lh /boot/initramfs-laurel
           "
 
-          if [ -f alpine-chroot/boot/initramfs-laurel ]; then
-            cp alpine-chroot/boot/initramfs-laurel artifacts/initramfs
-            echo "Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
-          else
-            echo "No initramfs generated"
-            ls -lh alpine-chroot/boot/ 2>/dev/null || echo "(no boot dir)"
-          fi
+          cp alpine-chroot/boot/initramfs-laurel artifacts/initramfs
+          echo "Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
 
       # ============================================================
       # Build boot.img with mkbootimg
