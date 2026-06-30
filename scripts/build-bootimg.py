@@ -44,6 +44,12 @@ def main():
         if r.returncode != 0:
             print(f'git clone failed: {r.stderr[:200]}')
             sys.exit(1)
+        # Ubuntu 24.04 gcc estricto: patch -Werror out for modern gcc
+        subprocess.run(
+            ['sed', '-i', 's/-Werror//',
+             '/tmp/mkbootimg-src/Makefile',
+             '/tmp/mkbootimg-src/libmincrypt/Makefile'],
+            capture_output=True)
         r = subprocess.run(
             ['make', '-C', '/tmp/mkbootimg-src'],
             capture_output=True, text=True)

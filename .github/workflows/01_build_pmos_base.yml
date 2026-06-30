@@ -320,6 +320,7 @@ jobs:
               kmod e2fsprogs e2fsprogs-extra \
               zstd xz gzip cpio \
               eudev \
+              libinput \
               2>&1 | tail -20 || true
 
             # Symlinks para rutas que mkinitfs espera
@@ -342,15 +343,31 @@ jobs:
               [ -f "$flist" ] || continue
               echo "-- checking $(basename $flist)"
 
-              # Extraer todos los paths del file list (quitar coments)
+              # Extraer todos los paths y globs del file list
               sed "s/#.*//" "$flist" |
-              grep -Eo "/[A-Za-z0-9._+/@=-][A-Za-z0-9._+/@=-]*" |
+              grep -Eo "/[A-Za-z0-9._*?+/@=-][A-Za-z0-9._*?+/@=-]*" |
               sort -u |
               while IFS= read -r fpath; do
                 [ -n "$fpath" ] || continue
 
+                # Globs (*, ?) — crear dummy file que matchee
+                case "$fpath" in
+                  *\**|*\?*)
+                    dir="$(dirname "$fpath")"
+                    base="$(basename "$fpath")"
+                    mkdir -p "$dir"
+                    # Reemplazar globs con 00-dummy
+                    dummy_base=$(echo "$base" | sed 's/[*?]/00-dummy/g')
+                    dummy="$dir/$dummy_base"
+                    if [ ! -f "$dummy" ]; then
+                      touch "$dummy"
+                      echo "Created dummy for glob: $fpath -> $dummy" >&2
+                    fi
+                    continue
+                    ;;
+                esac
+
                 if [ ! -e "$fpath" ] && [ ! -e "${fpath}.zst" ]; then
-                  # Path termina con / -> es directorio
                   case "$fpath" in
                     */)
                       echo "Creating directory: $fpath" >&2
