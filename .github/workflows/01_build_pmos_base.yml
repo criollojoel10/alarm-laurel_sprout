@@ -442,10 +442,14 @@ jobs:
             cat /usr/share/kernel/*/kernel.release
             echo "=== modules ==="
             ls /lib/modules/
-            mkinitfs -d /boot -no-bootdeploy 2>&1 || true
+            # mkinitfs con boot-deploy: crear dummy kernel para que no falle
+            # boot-deploy copia initramfs del staging a /boot/; sin el kernel,
+            # falla y el initramfs nunca se despliega (temp se borra al salir)
+            ln -s /bin/busybox /boot/vmlinuz-6.1.0-sm6125 2>/dev/null || touch /boot/vmlinuz-6.1.0-sm6125
+            mkinitfs -d /boot 2>&1 || true
             echo "=== searching for initramfs ==="
             ls -lh /boot/ 2>/dev/null || echo "/boot/ empty"
-            find /tmp /var/tmp /boot -name "initramfs*" -type f 2>/dev/null | head -5 || true
+            find /boot -name "initramfs*" -type f 2>/dev/null | head -5 || true
             echo "=== boot ==="
             ls -lh /boot/
           '
