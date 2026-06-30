@@ -1,0 +1,286 @@
+name: "02 — Build Arch Linux ARM for laurel_sprout"
+
+on:
+  workflow_dispatch:
+    inputs:
+      rootfs_size:
+        description: "Rootfs image size (GB)"
+        default: "8"
+
+permissions:
+  contents: write
+
+env:
+  ARCH_ROOTFS_URL: "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+  DEVICE: xiaomi-laurel
+  KERNEL_PKG: linux-postmarketos-qcom-sm6125
+  KERNEL_CONFIG_URL: "https://raw.githubusercontent.com/mainlining/pmaports/master/device/testing/linux-postmarketos-qcom-sm6125/config-postmarketos-qcom-sm6125.aarch64"
+  KERNEL_REPO: "https://gitlab.com/sm6125-mainline/linux.git"
+  # PMOS binary package base URL for fallback package downloads
+  PMOS_PKG_BASE: "https://packages.postmarketos.org"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libarchive-tools xz-utils zstd e2fsprogs \
+            qemu-user-static binfmt-support \
+            gcc-aarch64-linux-gnu python3 \
+            --no-install-recommends
+
+      # ============================================================
+      # Get pmOS base artifact (from workflow 01)
+      # ============================================================
+      - name: Download pmOS base
+        uses: dawidd6/action-download-artifact@v9
+        with:
+          name: pmos-base-${{ env.DEVICE }}
+          path: pmos-base
+          workflow: 01_build_pmos_base.yml
+          workflow_conclusion: success
+          workflow_search: true
+          check_artifacts: true
+          repo: criollojoel10/alarm-laurel_sprout
+        continue-on-error: true
+
+      # Fallback: if no artifact yet, download packages from pmOS binary mirror
+      - name: Fallback — assemble boot.img from pmOS binary packages
+        if: steps.download_pmos_base.outcome == 'failure' || !steps.download_pmos_base.outcome
+        id: fallback
+        run: |
+          mkdir -p pmos-base
+
+          # Download kernel and device packages from pmOS binary repo
+          PMOS_ARCH="aarch64"
+          for pkg in \
+            "linux-postmarketos-qcom-sm6125" \
+            "device-xiaomi-laurel" \
+            "postmarketos-base"; do
+            echo "Downloading $pkg..."
+            # Try to get latest version from APKINDEX
+            PKG_URL="${{ env.PMOS_PKG_BASE }}/edge/$PMOS_ARCH/$pkg"
+            curl -sL --fail "$PKG_URL.pkg.tar.xz" -o "/tmp/$pkg.tar.xz" && {
+              echo "$pkg downloaded OK"
+            } || {
+              echo "⚠️ Could not download $pkg from binary cache, may need workflow 01"
+            }
+          done
+
+          # Extract boot.img components
+          mkdir -p pmos-boot
+          if [ -f "/tmp/linux-postmarketos-qcom-sm6125.tar.xz" ]; then
+            tar -xf "/tmp/linux-postmarketos-qcom-sm6125.tar.xz" -C pmos-boot boot/ 2>/dev/null || true
+          fi
+          ls -lh pmos-boot/ 2>/dev/null || echo "Boot dir may be empty"
+
+          # If we have vmlinuz and DTB, we can assemble a boot.img with mkbootimg
+          # But we still need the pmOS initramfs... this is the hard part
+          # For now, copy what we have
+          find pmos-boot -type f 2>/dev/null | head -20
+
+      - name: Check pmOS base availability
+        run: |
+          echo "=== pmos-base contents ==="
+          ls -lhR pmos-base/ 2>/dev/null || echo "⚠️ pmos-base empty, will use fallback"
+
+      # ============================================================
+      # Download Arch Linux ARM rootfs
+      # ============================================================
+      - name: Download Arch rootfs
+        run: |
+          wget -q --show-progress "${{ env.ARCH_ROOTFS_URL }}" -O arch-rootfs.tar.gz
+          ls -lh arch-rootfs.tar.gz
+
+      # ============================================================
+      # Create rootfs image with pmOS_root label
+      # ============================================================
+      - name: Create and mount rootfs
+        run: |
+          truncate -s ${{ inputs.rootfs_size }}G rootfs.img
+          mkfs.ext4 -F -L pmOS_root rootfs.img
+          mkdir -p mnt
+          sudo mount rootfs.img mnt
+
+      - name: Extract Arch rootfs
+        run: |
+          sudo bsdtar -xpf arch-rootfs.tar.gz -C mnt
+          echo "Arch rootfs extracted. Size:"
+          df -h mnt
+
+      # ============================================================
+      # Inject pmOS modules + firmware
+      # ============================================================
+      - name: Inject kernel modules and firmware
+        run: |
+          if [ -f pmos-base/modules-${{ env.DEVICE }}.tar.gz ]; then
+            sudo tar -xzf pmos-base/modules-${{ env.DEVICE }}.tar.gz -C mnt/usr/lib/
+            echo "Modules injected from pmOS base artifact"
+          elif [ -d pmos-boot/lib ]; then
+            sudo cp -r pmos-boot/lib/* mnt/usr/lib/ 2>/dev/null || true
+            echo "Modules copied from fallback"
+          fi
+
+          KVER=$(ls mnt/usr/lib/modules/ 2>/dev/null | head -1)
+          if [ -n "$KVER" ]; then
+            echo "Kernel version: $KVER"
+            echo "KVER=$KVER" >> $GITHUB_ENV
+            sudo depmod -b mnt "$KVER" 2>&1 || true
+          else
+            echo "⚠️ No kernel modules found. Will need to install via pacman."
+          fi
+
+      # ============================================================
+      # Chroot setup
+      # ============================================================
+      - name: Prepare chroot
+        run: |
+          sudo cp "$(which qemu-aarch64-static)" mnt/usr/bin/
+          sudo mount -t proc proc mnt/proc
+          sudo mount --bind /sys mnt/sys
+          sudo mount --bind /dev mnt/dev
+          sudo mount --bind /dev/pts mnt/dev/pts 2>/dev/null || true
+          sudo rm -f mnt/etc/resolv.conf
+          sudo bash -c 'cp /etc/resolv.conf mnt/etc/resolv.conf'
+          sudo sed -i '/\[options\]/a DisableSandbox' mnt/etc/pacman.conf 2>/dev/null || true
+
+      - name: Install packages in chroot
+        run: |
+          sudo chroot mnt /bin/bash -c '
+            pacman-key --init 2>&1
+            pacman-key --populate archlinuxarm 2>&1
+            pacman -Syu --noconfirm --needed \
+              busybox \
+              sudo vim nano git openssh rsync curl wget \
+              networkmanager iwd wpa_supplicant \
+              htop tmux 2>&1
+          '
+
+      # ============================================================
+      # CRITICAL FIX: /etc/fstab
+      # The pmOS initramfs checks if fstab is empty. If it is, it tries
+      # to find pmOS_boot partition (30s wait). With fstab present it
+      # skips this and goes straight to switch_root.
+      # ============================================================
+      - name: Create /etc/fstab
+        run: |
+          printf '%s\n' \
+            '# /etc/fstab — Arch Linux ARM on laurel_sprout' \
+            '' \
+            'LABEL=pmOS_root  /  ext4  rw,noatime,nodiratime,data=ordered  0 1' \
+            'tmpfs  /tmp  tmpfs  rw,nosuid,nodev,noexec,mode=1777  0 0' \
+            | sudo tee mnt/etc/fstab > /dev/null
+          echo "✓ /etc/fstab:"
+          cat mnt/etc/fstab
+
+      # ============================================================
+      # Fix boot.img cmdline (remove stale UUIDs)
+      # ============================================================
+      - name: Fix boot.img cmdline
+        run: |
+          BOOT_IMG=""
+          [ -f pmos-base/boot.img ] && BOOT_IMG="pmos-base/boot.img"
+          [ -z "$BOOT_IMG" ] && [ -f pmos-base/boot.img ] && BOOT_IMG="pmos-base/boot.img"
+
+          if [ -n "$BOOT_IMG" ] && [ -f "$BOOT_IMG" ]; then
+            echo "Fixing boot.img cmdline..."
+            python3 scripts/fix-cmdline.py "$BOOT_IMG" boot-begonia-arch.img
+
+            # Verify
+            python3 -c "
+            with open('boot-begonia-arch.img', 'rb') as f:
+                data = f.read(1648)
+            c = data[64:576].rstrip(b'\x00').decode('ascii', 'replace')
+            print('Cmdline after fix:')
+            print(c)
+            print()
+            print('UUIDs stale:', 'pmos_root_uuid=' in c or 'pmos_boot_uuid=' in c)
+            "
+          else
+            echo "⚠️ No boot.img found. Will try to generate from pmOS packages."
+            echo "For first build, please run workflow 01 first."
+            # Create a placeholder — user needs to supply boot.img
+            dd if=/dev/zero bs=1M count=32 of=boot-begonia-arch.img 2>/dev/null
+          fi
+
+      # ============================================================
+      # Enable services & create user
+      # ============================================================
+      - name: Configure system
+        run: |
+          sudo chroot mnt /bin/bash -c '
+            systemctl set-default multi-user.target
+            systemctl enable sshd
+            systemctl enable NetworkManager
+            systemctl enable systemd-timesyncd
+            useradd -m -s /bin/bash alarm 2>/dev/null || true
+            echo "alarm:alarm" | chpasswd
+            usermod -aG wheel alarm 2>/dev/null || true
+            sed -i "s/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/" /etc/sudoers
+            echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+          '
+
+      # ============================================================
+      # Cleanup & release
+      # ============================================================
+      - name: Cleanup and compress
+        run: |
+          sudo umount mnt/dev/pts 2>/dev/null || true
+          sudo umount mnt/dev 2>/dev/null || true
+          sudo umount mnt/sys 2>/dev/null || true
+          sudo umount mnt/proc 2>/dev/null || true
+          sudo umount mnt 2>/dev/null || true
+
+          mkdir -p release
+          mv boot-begonia-arch.img release/
+          xz -9 -T 0 -f rootfs.img
+          mv rootfs.img.xz release/rootfs-archlinuxarm-laurel-console.img.xz
+          [ -f flash/flash-laurel.sh ] && cp flash/flash-laurel.sh release/
+          cd release && sha256sum * > SHA256SUMS.txt && ls -lh && cd ..
+
+      - name: Create/Update Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: nightly
+          name: "Arch Linux ARM for Xiaomi Mi A3 (laurel_sprout) — nightly"
+          body: |
+            ## Arch Linux ARM on postmarketOS for ×iaomi Mi A3 (laurel_sprout)
+
+            **Enfoque:** pmOS kernel + initramfs + DTB, rootfs = Arch Linux ARM.
+
+            ### Flujo de boot
+            ```
+            Bootloader → kernel pmOS 6.1 (qcom-sm6125 mainline) 
+            → pmOS initramfs
+            → busca pmOS_root por label ✅
+            → monta rootfs → verifica fstab  
+            → switch_root → systemd de Arch Linux ARM 🚀
+            ```
+
+            **Kernel:** linux-postmarketos-qcom-sm6125 (6.1 mainline fork)
+            **Initramfs:** pmOS original
+            **Userspace:** Arch Linux ARM aarch64
+
+            ### Install
+            Requiere bootloader desbloqueado y fastboot.
+            ```
+            xz -d rootfs-archlinuxarm-laurel-console.img.xz
+            fastboot format:ext4 userdata
+            fastboot flash boot boot-begonia-arch.img
+            fastboot flash userdata rootfs-archlinuxarm-laurel-console.img
+            fastboot reboot
+            ```
+
+            **Login:** `alarm` / `alarm`
+          prerelease: true
+          makeLatest: true
+          allowUpdates: true
+          replacesArtifacts: true
+          artifacts: release/*

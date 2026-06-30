@@ -1,0 +1,132 @@
+name: "01 — Build pmOS base for laurel_sprout"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"  # Weekly Monday 06:00 UTC
+
+permissions:
+  contents: write
+
+env:
+  DEVICE: xiaomi-laurel
+  KERNEL_PKG: linux-postmarketos-qcom-sm6125
+  UI: console
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            coreutils findutils util-linux e2fsprogs \
+            xz-utils zstd python3 file \
+            qemu-user-static binfmt-support \
+            android-sdk-libsparse-utils \
+            --no-install-recommends
+
+      # ============================================================
+      # pmbootstrap setup
+      # ============================================================
+      - name: Install pmbootstrap
+        run: |
+          sudo apt-get install -y -qq git openssl 2>/dev/null || true
+          git clone --depth 1 https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git /tmp/pmbootstrap
+          pip install -e /tmp/pmbootstrap 2>&1 | tail -5
+          pmbootstrap --version
+
+      - name: Configure pmbootstrap
+        run: |
+          # Non-interactive config for xiaomi-laurel
+          pmbootstrap init \
+            --device "${{ env.DEVICE }}" \
+            --ui "${{ env.UI }}" \
+            --non-interactive \
+            --details-to-stdout 2>&1 | tail -20
+
+          # Verify config
+          cat ~/.config/pmbootstrap.cfg 2>/dev/null | head -30 || true
+
+      - name: Build kernel package
+        run: |
+          pmbootstrap build "${{ env.KERNEL_PKG }}" --details-to-stdout 2>&1 | tail -20
+
+      - name: Build device package
+        run: |
+          pmbootstrap build "device-${{ env.DEVICE }}" --details-to-stdout 2>&1 | tail -10
+
+      - name: Install to image
+        run: |
+          pmbootstrap install --no-base --disk-size 8G --details-to-stdout 2>&1 | tail -20
+
+      # ============================================================
+      # Extract artifacts
+      # ============================================================
+      - name: Extract boot.img
+        run: |
+          # Find the generated image
+          IMG_DIR="$HOME/.local/var/pmbootstrap/chroot_native/home/pmos/rootfs"
+          IMG=$(find "$IMG_DIR" -name "*.img" 2>/dev/null | head -1)
+
+          if [ -z "$IMG" ]; then
+            # Try alternative paths
+            IMG=$(find / -path "*/pmbootstrap/*" -name "*.img" 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$IMG" ]; then
+            echo "Looking for image using pmbootstrap status..."
+            pmbootstrap status 2>&1 | grep -i image || true
+            IMG=$(pmbootstrap status 2>&1 | grep -oP '/[^ ]+\.img' | head -1)
+          fi
+
+          if [ -z "$IMG" ]; then
+            echo "Trying work dir..."
+            ls -la "$HOME/.local/var/pmbootstrap/" 2>/dev/null || true
+            IMG=$(find "$HOME/.local/var/pmbootstrap" -name "*.img" 2>/dev/null | head -1)
+          fi
+
+          echo "Found image: $IMG"
+          [ -z "$IMG" ] && { echo "❌ No image found"; exit 1; }
+
+          ls -lh "$IMG"
+          mkdir -p pmos-artifacts
+
+          # Extract boot.img from the flashed image
+          # On Qualcomm devices, boot is a separate partition within the image
+          # pmbootstrap creates a full image: first partition = boot, second = root
+          python3 scripts/scan-extract-fs.py "$IMG" pmos-artifacts
+
+      - name: Package artifacts
+        run: |
+          cd pmos-artifacts
+          ls -lh
+          # If boot.img exists from scan, use it
+          if [ -f "boot.img" ]; then
+            cp boot.img "${{ github.workspace }}/boot.img"
+          fi
+          # Package modules and firmware
+          if [ -d "lib" ]; then
+            tar -czf "${{ github.workspace }}/modules-${{ env.DEVICE }}.tar.gz" lib/
+          fi
+          if [ -f "vmlinuz" ]; then
+            cp vmlinuz "${{ github.workspace }}/vmlinuz"
+          fi
+          cd "${{ github.workspace }}"
+          echo "=== Artifacts ==="
+          ls -lh boot.img vmlinuz modules-${{ env.DEVICE }}.tar.gz 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmos-base-${{ env.DEVICE }}
+          path: |
+            boot.img
+            vmlinuz
+            modules-${{ env.DEVICE }}.tar.gz
+          retention-days: 7
