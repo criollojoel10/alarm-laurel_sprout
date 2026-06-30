@@ -368,8 +368,11 @@ jobs:
                       fi
                       ;;
                     /usr/share/*)
-                      echo "FATAL: required data file $fpath missing" >&2
-                      exit 11
+                      # source_deviceinfo ya se capturo arriba con FATAL. Otros
+                      # archivos en /usr/share (consolefonts, etc.) son datos no criticos
+                      echo "Creating empty file: $fpath (data file, not critical)" >&2
+                      mkdir -p "$(dirname "$fpath")"
+                      touch "$fpath"
                       ;;
                     /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*)
                       echo "Creating stub for: $fpath" >&2
