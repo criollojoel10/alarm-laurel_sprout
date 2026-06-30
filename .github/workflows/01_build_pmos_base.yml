@@ -43,7 +43,9 @@ jobs:
               apk update
 
           # Install kernel + device + base packages
+          # postmarketos-mkinitfs needs losetup for initramfs generation
           RUN apk add --no-cache \
+              util-linux \
               linux-postmarketos-qcom-sm6125 \
               device-xiaomi-laurel \
               postmarketos-base-core \
