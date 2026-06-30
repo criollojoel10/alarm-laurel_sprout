@@ -140,12 +140,12 @@ jobs:
             exit 1
           fi
 
-          # --- Firmware ---
+          # --- Firmware (try multiple locations) ---
           FIRMWARE_DIRS=""
           [ -d pmos-root/lib/firmware ] && FIRMWARE_DIRS="$FIRMWARE_DIRS pmos-root/lib/firmware"
           [ -d pmos-root/usr/lib/firmware ] && FIRMWARE_DIRS="$FIRMWARE_DIRS pmos-root/usr/lib/firmware"
+          [ -d pmos-root/firmware ] && FIRMWARE_DIRS="$FIRMWARE_DIRS pmos-root/firmware"
           if [ -n "$FIRMWARE_DIRS" ]; then
-            # The firmware directory could be large, just tar what's there
             for fd in $FIRMWARE_DIRS; do
               tar -czf artifacts/firmware.tar.gz -C "$(dirname $fd)" "$(basename $fd)" 2>/dev/null || true
             done
@@ -159,8 +159,18 @@ jobs:
             echo "⚠️ No firmware directory found"
           fi
 
-          # --- DTB ---
-          DTB=$(find pmos-root -name "*.dtb" | head -5)
+          # --- DTB (laurel = qcom/sm6125-xiaomi-laurel_sprout) ---
+          # Buscar DTB de laurel: sm6125, qcom, o con nombre 'laurel'
+          DTB=$(find pmos-root -name "*laurel*" -name "*.dtb" 2>/dev/null | head -1)
+          if [ -z "$DTB" ]; then
+            DTB=$(find pmos-root -name "*sm6125*.dtb" 2>/dev/null | head -1)
+          fi
+          if [ -z "$DTB" ]; then
+            DTB=$(find pmos-root -path "*/firmware/*qcom*" -name "*.dtb" 2>/dev/null | head -5)
+          fi
+          if [ -z "$DTB" ]; then
+            DTB=$(find pmos-root -name "*.dtb" -not -path "*/zynq*" 2>/dev/null | head -5)
+          fi
           if [ -n "$DTB" ]; then
             mkdir -p artifacts/dtbs
             echo "$DTB" | while IFS= read -r dtb; do
@@ -168,14 +178,28 @@ jobs:
             done
             echo "✅ DTB files:"
             ls -lh artifacts/dtbs/
+          else
+            echo "⚠️ No DTB found"
           fi
 
-          # --- DeviceInfo ---
-          DI=$(find pmos-root -name "deviceinfo" | head -1)
-          if [ -n "$DI" ]; then
-            cp "$DI" artifacts/deviceinfo
+          # --- DeviceInfo (es directorio en pmOS, no archivo) ---
+          DI_DIR=$(find pmos-root -type d -name "deviceinfo" 2>/dev/null | head -1)
+          if [ -d "$DI_DIR" ]; then
+            # deviceinfo suele estar como subdirectorio con archivo dentro
+            DI_FILE=$(find "$DI_DIR" -maxdepth 1 -type f 2>/dev/null | head -1)
+            if [ -z "$DI_FILE" ]; then
+              # Buscar recursivamente por el archivo deviceinfo
+              DI_FILE=$(find pmos-root -name "deviceinfo" -type f 2>/dev/null | head -1)
+            fi
+          else
+            DI_FILE=$(find pmos-root -name "deviceinfo" -type f 2>/dev/null | head -1)
+          fi
+          if [ -n "$DI_FILE" ]; then
+            cp "$DI_FILE" artifacts/deviceinfo
             echo "=== deviceinfo ==="
-            cat artifacts/deviceinfo
+            cat artifacts/deviceinfo 2>/dev/null || echo "(empty)"
+          else
+            echo "⚠️ deviceinfo not found as file"
           fi
 
           # ============================================================
