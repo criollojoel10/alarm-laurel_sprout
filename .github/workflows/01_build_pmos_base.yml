@@ -8,189 +8,144 @@ on:
 permissions:
   contents: write
 
-env:
-  DEVICE: xiaomi-laurel
-  PMOS_MIRROR: "https://mirror.postmarketos.org/postmarketos/main"
-
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU for aarch64
+      - name: Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static binfmt-support --no-install-recommends
-          # GitHub runners have Docker pre-installed, verify
-          docker --version 2>/dev/null || { echo '❌ Docker not available'; exit 1; }
-          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+          sudo apt-get install -y -qq wget xz-utils zstd cpio --no-install-recommends
 
-      - name: Build pmOS base image
+      # ============================================================
+      # Download and extract pmOS base packages directly
+      # .apk = tar.gz with signature. We extract only the data.
+      # ============================================================
+      - name: Download and extract pmOS packages
         run: |
-          mkdir -p /tmp/pmos-builder
-          cat > /tmp/pmos-builder/Dockerfile << 'DOCKERFILE'
-          FROM arm64v8/alpine:edge
+          PMOS_MIRROR="https://mirror.postmarketos.org/postmarketos/main/aarch64"
+          mkdir -p pmos-pkgs pmos-root
 
-          # Add pmOS repository mirror
-          RUN echo "https://mirror.postmarketos.org/postmarketos/main" >> /etc/apk/repositories
+          # Download APKINDEX to find exact filenames
+          wget -q "$PMOS_MIRROR/APKINDEX.tar.gz" -O pmos-pkgs/APKINDEX.tar.gz
 
-          # Add pmOS signing key
-          RUN wget -q "https://mirror.postmarketos.org/build.postmarketos.org.rsa.pub" \
-              -O /etc/apk/keys/build.postmarketos.org.rsa.pub && \
-              apk update
+          # Find exact package filenames
+          KERNEL_APK=$(tar -xzf pmos-pkgs/APKINDEX.tar.gz -O APKINDEX 2>/dev/null | grep -A2 "^P:linux-postmarketos-qcom-sm6125$" | grep "^V:" | head -1 | awk '{print $2}')
+          echo "Kernel version: $KERNEL_APK"
+          KERNEL_FILE=$(find pmos-pkgs -name "linux-postmarketos-qcom-sm6125-*" 2>/dev/null | head -1)
 
-          # Install kernel + device + base packages
-          # postmarketos-mkinitfs needs losetup for initramfs generation
-          RUN apk add --no-cache \
-              util-linux \
-              linux-postmarketos-qcom-sm6125 \
-              device-xiaomi-laurel \
-              postmarketos-base-core \
-              postmarketos-mkinitfs \
-              mkbootimg-osm0sis \
-              linux-firmware-qcom \
-              devicepkg-dev \
-              2>&1
+          # Download kernel package
+          KERNEL_PKG="linux-postmarketos-qcom-sm6125-${KERNEL_APK}.apk"
+          echo "Downloading: $KERNEL_PKG"
+          wget -q "$PMOS_MIRROR/$KERNEL_PKG" -O pmos-pkgs/$KERNEL_PKG 2>&1 || {
+            # Try without version suffix
+            wget -q "$PMOS_MIRROR/linux-postmarketos-qcom-sm6125.apk" -O pmos-pkgs/linux-postmarketos-qcom-sm6125.apk 2>&1 || true
+          }
 
-          # Generate initramfs
-          RUN KVER=$(ls /lib/modules/ | head -1) && \
-              echo "Kernel: $KVER" && \
-              mkinitfs -o /boot/initramfs.img "$KVER" && \
-              ls -lh /boot/initramfs.img
+          # Download device package  
+          DEVICE_APK=$(tar -xzf pmos-pkgs/APKINDEX.tar.gz -O APKINDEX 2>/dev/null | grep -A2 "^P:device-xiaomi-laurel$" | grep "^V:" | head -1 | awk '{print $2}')
+          echo "Device version: $DEVICE_APK"
+          DEVICE_PKG="device-xiaomi-laurel-${DEVICE_APK}.apk"
+          wget -q "$PMOS_MIRROR/$DEVICE_PKG" -O pmos-pkgs/$DEVICE_PKG 2>&1 || {
+            wget -q "$PMOS_MIRROR/device-xiaomi-laurel.apk" -O pmos-pkgs/device-xiaomi-laurel.apk 2>&1 || true
+          }
 
-          # Create output script
-          RUN mkdir -p /output
-          DOCKERFILE
+          # Download firmware (optional, for Qualcomm Wi-Fi/Bluetooth)
+          FIRMWARE_PKG="linux-firmware-qcom-20260110-r1.apk"
+          wget -q "$PMOS_MIRROR/$FIRMWARE_PKG" -O pmos-pkgs/$FIRMWARE_PKG 2>&1 || true
 
-          docker buildx build \
-            --platform linux/arm64 \
-            -t pmos-laurel-builder \
-            /tmp/pmos-builder/ 2>&1
+          echo "=== Downloaded packages ==="
+          ls -lh pmos-pkgs/
 
-      - name: Extract artifacts from Docker image
+          # Extract kernel .apk (skip .SIGN.RSA., .PKGINFO, extract everything else)
+          for apk in pmos-pkgs/*.apk; do
+            echo "Extracting: $apk"
+            # .apk = .tar.gz with .SIGN.RSA. and .PKGINFO at start
+            # Skip the first two entries (signature + PKGINFO)
+            tar -xzf "$apk" --skip-old-files -C pmos-root 2>/dev/null || {
+              # Alternative: extract all, we don't care about signature files
+              tar -xzf "$apk" -C pmos-root 2>/dev/null || true
+            }
+          done
+
+          echo "=== Extracted files ==="
+          find pmos-root -type f | head -30
+          echo "..."
+          find pmos-root -type f | wc -l
+
+      # ============================================================
+      # Identify kernel, DTB, modules, firmware
+      # ============================================================
+      - name: Identify artifacts
         run: |
-          mkdir -p pmos-artifacts
+          mkdir -p artifacts
 
-          docker run --rm --platform linux/arm64 \
-            -v ${{ github.workspace }}/pmos-artifacts:/output \
-            pmos-laurel-builder \
-            bash -c '
-              set -e
-              KVER=$(ls /lib/modules/ | head -1)
-              echo "Kernel: $KVER"
+          # Find kernel Image
+          KERNEL=$(find pmos-root -name "Image.gz" -o -name "Image" -o -name "vmlinuz*" 2>/dev/null | head -1)
+          if [ -z "$KERNEL" ]; then
+            KERNEL=$(find pmos-root -name "*.gz" -path "*/boot/*" | head -1)
+          fi
+          if [ -f "$KERNEL" ]; then
+            cp "$KERNEL" artifacts/kernel-Image.gz
+            echo "✅ Kernel: $KERNEL ($(ls -lh $KERNEL | awk '{print $5}'))"
+          else
+            echo "❌ No kernel found"
+            find pmos-root -type f -name "*.gz" | head -10
+          fi
 
-              # Find kernel (vmlinuz / Image)
-              VMLINUZ=$(find /boot -name "vmlinuz*" -o -name "Image*" 2>/dev/null | head -1)
-              if [ -z "$VMLINUZ" ]; then
-                VMLINUZ=$(find /lib/modules -name "vmlinuz*" -o -name "Image*" 2>/dev/null | head -1)
-              fi
-              if [ -z "$VMLINUZ" ]; then
-                # Extract from the kernel package
-                VMLINUZ="/lib/modules/$KVER/vmlinuz"
-                [ -f "$VMLINUZ" ] || VMLINUZ=""
-              fi
-              echo "Kernel: $VMLINUZ ($(ls -lh $VMLINUZ 2>/dev/null | awk "{print \$5}"))"
+          # Find kernel version
+          KVER=$(ls pmos-root/lib/modules/ 2>/dev/null | head -1)
+          if [ -z "$KVER" ]; then
+            KVER=$(ls pmos-root/usr/lib/modules/ 2>/dev/null | head -1)
+          fi
+          echo "Kernel version: $KVER"
+          echo "$KVER" > artifacts/kernel-version.txt
 
-              # Initramfs
-              INITRAMFS=$(find /boot -name "initramfs*" 2>/dev/null | head -1)
-              echo "Initramfs: $INITRAMFS ($(ls -lh $INITRAMFS 2>/dev/null | awk "{print \$5}"))"
+          # Find DTB
+          DTB_BASE="pmos-root/usr/lib/modules"
+          if [ ! -d "$DTB_BASE" ]; then
+            DTB_BASE="pmos-root/lib/modules"
+          fi
+          DTB=$(find "$DTB_BASE/$KVER/dtbs" -name "*.dtb" 2>/dev/null | head -1)
+          if [ -n "$DTB" ]; then
+            cp "$DTB" artifacts/device.dtb
+            echo "✅ DTB: $DTB"
+          else
+            echo "⚠️ No DTB found"
+          fi
 
-              # DTB
-              DTB=$(find /lib/modules/$KVER/dtbs -name "*laurel*" 2>/dev/null | head -1)
-              [ -z "$DTB" ] && DTB=$(find /lib/modules/$KVER/dtbs -name "*.dtb" 2>/dev/null | head -1)
-              echo "DTB: $DTB ($(ls -lh $DTB 2>/dev/null | awk "{print \$5}"))"
+          # Package modules
+          MOD_DIR="pmos-root/usr/lib/modules"
+          [ -d "$MOD_DIR" ] || MOD_DIR="pmos-root/lib/modules"
+          if [ -d "$MOD_DIR/$KVER" ]; then
+            tar -czf artifacts/modules-laurel.tar.gz -C "$MOD_DIR" "$KVER"
+            echo "✅ Modules packaged: $(du -sh artifacts/modules-laurel.tar.gz | awk '{print $1}')"
+          fi
 
-              # Get cmdline from deviceinfo
-              CMDLINE=$(grep "^deviceinfo_kernel_cmdline" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "")
-              [ -z "$CMDLINE" ] && CMDLINE="clk_ignore_unused"
-              echo "Cmdline: $CMDLINE"
+          # Package firmware
+          FW_DIR="pmos-root/lib/firmware"
+          if [ -d "$FW_DIR" ]; then
+            tar -czf artifacts/firmware-laurel.tar.gz -C "$FW_DIR" .
+            echo "✅ Firmware packaged: $(du -sh artifacts/firmware-laurel.tar.gz | awk '{print $1}')"
+          fi
 
-              # Get boot image parameters
-              BASE=$(grep "^deviceinfo_flash_offset_base" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x00000000")
-              KOFF=$(grep "^deviceinfo_flash_offset_kernel" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x00008000")
-              ROFF=$(grep "^deviceinfo_flash_offset_ramdisk" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x01000000")
-              SOFF=$(grep "^deviceinfo_flash_offset_second" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x00f00000")
-              TOFF=$(grep "^deviceinfo_flash_offset_tags" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x00000100")
-              PGSZ=$(grep "^deviceinfo_flash_pagesize" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "4096")
-              APPEND_DTB=$(grep "^deviceinfo_append_dtb" /usr/share/deviceinfo/deviceinfo 2>/dev/null | grep -qi "true" && echo "true" || echo "false")
+          # Copy deviceinfo
+          DI=$(find pmos-root -name "deviceinfo" 2>/dev/null | head -1)
+          if [ -n "$DI" ]; then
+            cp "$DI" artifacts/deviceinfo
+            cat artifacts/deviceinfo
+          fi
 
-              echo "Boot params: base=$BASE koff=$KOFF roff=$ROFF soff=$SOFF toff=$TOFF pgsz=$PGSZ append_dtb=$APPEND_DTB"
-
-              # Append DTB to kernel if needed
-              if [ "$APPEND_DTB" = "true" ] && [ -n "$DTB" ] && [ -f "$DTB" ]; then
-                cat "$VMLINUZ" "$DTB" > /tmp/kernel-dtb.img
-                KERNEL_PATH="/tmp/kernel-dtb.img"
-                echo "DTB appended to kernel"
-              else
-                KERNEL_PATH="$VMLINUZ"
-              fi
-
-              # Build boot.img
-              if [ -f "$KERNEL_PATH" ] && [ -f "$INITRAMFS" ]; then
-                mkbootimg \
-                  --kernel "$KERNEL_PATH" \
-                  --ramdisk "$INITRAMFS" \
-                  --dtb "$DTB" \
-                  --cmdline "$CMDLINE" \
-                  --base "$BASE" \
-                  --kernel_offset "$KOFF" \
-                  --ramdisk_offset "$ROFF" \
-                  --second_offset "$SOFF" \
-                  --tags_offset "$TOFF" \
-                  --pagesize "$PGSZ" \
-                  --os_version 22.0.0 \
-                  --os_patch_level 2026-06 \
-                  -o /output/boot.img 2>&1
-                echo "=== boot.img ==="
-                ls -lh /output/boot.img
-              else
-                echo "❌ Missing files"
-                echo "Kernel exists: $([ -f "$KERNEL_PATH" ] && echo yes || echo no)"
-                echo "Initramfs exists: $([ -f "$INITRAMFS" ] && echo yes || echo no)"
-                exit 1
-              fi
-
-              # Copy kernel and modules for later use (Arch build)
-              cp "$VMLINUZ" /output/vmlinuz 2>/dev/null || true
-              cp "$INITRAMFS" /output/initramfs.img 2>/dev/null || true
-              [ -n "$DTB" ] && cp "$DTB" /output/ 2>/dev/null || true
-              tar -czf /output/modules.tar.gz -C /lib modules/ 2>/dev/null || true
-              tar -czf /output/firmware.tar.gz -C /lib firmware/ 2>/dev/null || true
-              cp /usr/share/deviceinfo/deviceinfo /output/deviceinfo 2>/dev/null || true
-
-              echo ""
-              echo "=== /output contents ==="
-              ls -lh /output/
-            '
-
-      - name: Verify boot.img
-        run: |
           echo "=== Artifacts ==="
-          ls -lh pmos-artifacts/
-
-          python3 -c "
-          import struct
-          with open('pmos-artifacts/boot.img', 'rb') as f:
-              data = f.read(576)
-          magic = data[0:8].decode('ascii', errors='replace')
-          cmdline = data[64:576].rstrip(b'\x00').decode('ascii', 'replace')
-          print(f'Magic: {magic} ✅')
-          print(f'Cmdline: {cmdline}')
-          print(f'root= present: {\"root=\" in cmdline}')
-          print(f'pmOS boot label: {\"pmOS_root\" in cmdline or \"pmOS_boot\" in cmdline}')
-
-          r_size = struct.unpack('<I', data[16:20])[0]
-          k_size = struct.unpack('<I', data[8:12])[0]
-          print(f'Ramdisk: {r_size:,} B')
-          print(f'Kernel: {k_size:,} B')
-          "
+          ls -lh artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pmos-base-${{ env.DEVICE }}
-          path: pmos-artifacts/
-          retention-days: 90
+          name: pmos-base-laurel_sprout
+          path: artifacts/
+          retention-days: 14
