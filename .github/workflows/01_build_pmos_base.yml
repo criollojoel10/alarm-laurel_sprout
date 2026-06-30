@@ -442,7 +442,7 @@ jobs:
             cat /usr/share/kernel/*/kernel.release
             echo "=== modules ==="
             ls /lib/modules/
-            mkinitfs -d /boot
+            mkinitfs -d /boot -no-bootdeploy > /boot/initramfs-6.1.0-sm6125.img 2>/tmp/mkinitfs.log; cat /tmp/mkinitfs.log; test -s /boot/initramfs-6.1.0-sm6125.img || { echo 'initramfs file is empty'; exit 1; }
             echo "=== boot ==="
             ls -lh /boot/
           '
