@@ -75,8 +75,13 @@ jobs:
           echo "pmOS base version: $PBASE_VER"
           [ -z "$PBASE_VER" ] && PBASE_PKG="" || PBASE_PKG="postmarketos-base-${PBASE_VER}.apk"
 
+          # devicepkg-utils (source_deviceinfo — requerido por mkinitfs)
+          DPU_VER=$(grep_ver "devicepkg-utils")
+          echo "devicepkg-utils version: $DPU_VER"
+          [ -z "$DPU_VER" ] && DPU_PKG="" || DPU_PKG="devicepkg-utils-${DPU_VER}.apk"
+
           # Download packages
-          for pkg in "$KERNEL_PKG" "$DEVICE_PKG" "$MKINIT_PKG" "$PINIT_PKG" "$PBASE_PKG"; do
+          for pkg in "$KERNEL_PKG" "$DEVICE_PKG" "$MKINIT_PKG" "$PINIT_PKG" "$PBASE_PKG" "$DPU_PKG"; do
             [ -z "$pkg" ] && continue
             echo "Downloading: $pkg"
             wget -q "$PMOS_MIRROR/$pkg" -O "pmos-pkgs/$pkg" || {
@@ -95,9 +100,13 @@ jobs:
 
           # Extract .apk files
           for apk in pmos-pkgs/*.apk; do
+            [ -s "$apk" ] || { echo "Skipping empty: $(basename $apk)"; continue; }
             echo "Extracting: $(basename $apk)"
             tar -xzf "$apk" -C pmos-root 2>/dev/null || true
           done
+
+          # Clean zero-size packages (firmware fallback often creates empty file)
+          find pmos-pkgs -name "*.apk" -size 0 -print -delete
 
           echo "=== Extracted files (first 40) ==="
           find pmos-root -type f | head -40
@@ -242,126 +251,136 @@ jobs:
           sudo mount --bind /dev alpine-chroot/dev
           sudo mount --bind /dev/pts alpine-chroot/dev/pts 2>/dev/null || true
 
-      - name: Copy pmOS binaries into Alpine chroot
+      - name: Prepare Alpine chroot (full pmOS runtime + tools)
         run: |
-          # No usamos 'apk add' (mirror pmOS no es repo Alpine valido).
-          # Copiamos mkinitfs + assets desde pmos-root directamente al chroot.
-
-          # mkinitfs binario
-          sudo cp -a pmos-root/usr/sbin/mkinitfs alpine-chroot/usr/sbin/mkinitfs
-          sudo chmod +x alpine-chroot/usr/sbin/mkinitfs
-
-          # Copiar todos los binarios de pmOS al chroot (mkinitfs lee file lists
-          # de /usr/share/mkinitfs/files/*.files que referencian /usr/bin/*)
-          if [ -d pmos-root/usr/bin ]; then
-            sudo cp -a pmos-root/usr/bin/. alpine-chroot/usr/bin/ 2>/dev/null || true
-          fi
-          if [ -d pmos-root/usr/sbin ]; then
-            sudo cp -a pmos-root/usr/sbin/. alpine-chroot/usr/sbin/ 2>/dev/null || true
-          fi
-
-          # Assets necesarios para mkinitfs
-          sudo mkdir -p alpine-chroot/usr/share
-          for dir in initramfs mkinitfs postmarketos-mkinitfs kernel deviceinfo; do
-            if [ -d "pmos-root/usr/share/$dir" ]; then
-              sudo mkdir -p "alpine-chroot/usr/share/$dir"
-              sudo cp -a "pmos-root/usr/share/$dir/." "alpine-chroot/usr/share/$dir/"
+          # ============================================================
+          # Copiar TODO el arbol pmos-root al chroot — asi no falta nada
+          # ============================================================
+          for top in usr/bin usr/sbin usr/lib usr/share lib etc sbin bin; do
+            if [ -d "pmos-root/$top" ]; then
+              sudo mkdir -p "alpine-chroot/$top"
+              sudo cp -a "pmos-root/$top/." "alpine-chroot/$top/" 2>/dev/null || echo "⚠️ Some files in $top failed to copy"
             fi
           done
-          echo "=== kernel metadata in chroot ==="
-          sudo find alpine-chroot/usr/share/kernel -maxdepth 3 -type f -o -type d 2>/dev/null | sort || true
-          echo "=== kernel.release ==="
-          sudo find alpine-chroot/usr/share/kernel -name kernel.release -exec sh -c 'echo "-- $1"; cat "$1"' sh {} \; 2>/dev/null || true
 
-          # Device info — mkinitfs requiere archivo (no directorio) en:
-          # /usr/share/deviceinfo/deviceinfo  o  /etc/deviceinfo
+          # Asegurar mkinitfs
+          sudo chmod +x alpine-chroot/usr/sbin/mkinitfs 2>/dev/null || true
+
+          # Asegurar deviceinfo
           DI_SRC="pmos-root/usr/share/deviceinfo/device-xiaomi-laurel"
-          if [ ! -f "$DI_SRC" ]; then
-            DI_SRC="$(find pmos-root/usr/share/deviceinfo -type f | head -1)"
-          fi
-          if [ -z "$DI_SRC" ] || [ ! -f "$DI_SRC" ]; then
-            echo "ERROR: no deviceinfo source found"
-            find pmos-root/usr/share/deviceinfo -maxdepth 2 -type f 2>/dev/null || true
-            exit 1
-          fi
-          echo "Using deviceinfo: $DI_SRC"
+          [ ! -f "$DI_SRC" ] && DI_SRC="$(find pmos-root/usr/share/deviceinfo -type f | head -1)"
+          [ -f "$DI_SRC" ] || { echo "ERROR: no deviceinfo found"; find pmos-root/usr/share/deviceinfo -maxdepth 2 -type f 2>/dev/null || true; exit 1; }
           sudo mkdir -p alpine-chroot/usr/share/deviceinfo
           sudo cp "$DI_SRC" alpine-chroot/usr/share/deviceinfo/deviceinfo
           sudo cp "$DI_SRC" alpine-chroot/etc/deviceinfo
-          echo "=== deviceinfo installed ==="
-          sudo ls -lh alpine-chroot/usr/share/deviceinfo/deviceinfo alpine-chroot/etc/deviceinfo
-          sudo head -10 alpine-chroot/etc/deviceinfo
 
-          # Kernel modules — preservar estructura 6.1.0-sm6125/
-          sudo mkdir -p alpine-chroot/lib/modules
-          sudo rm -rf alpine-chroot/lib/modules/*
-          if [ -d pmos-root/lib/modules ] && [ -n "$(ls pmos-root/lib/modules/)" ]; then
-            sudo cp -a pmos-root/lib/modules/. alpine-chroot/lib/modules/
+          # Asegurar source_deviceinfo (necesario para mkinitfs/postmarketos-initramfs)
+          # Si devicepkg-utils se descargo, ya existe en pmos-root/usr/share/misc/
+          if [ ! -f alpine-chroot/usr/share/misc/source_deviceinfo ]; then
+            sudo mkdir -p alpine-chroot/usr/share/misc
+            printf '#!/bin/sh\nSOURCE_DEVICEINFO_ROOT="${SOURCE_DEVICEINFO_ROOT:-}"\n[ -f "$SOURCE_DEVICEINFO_ROOT/usr/share/deviceinfo/deviceinfo" ] && . "$SOURCE_DEVICEINFO_ROOT/usr/share/deviceinfo/deviceinfo"\n[ -f "$SOURCE_DEVICEINFO_ROOT/etc/deviceinfo" ] && . "$SOURCE_DEVICEINFO_ROOT/etc/deviceinfo"\n[ -z "$deviceinfo_arch" ] && { echo "$0: ERROR: deviceinfo missing"; exit 1; } || true\n' | sudo tee alpine-chroot/usr/share/misc/source_deviceinfo > /dev/null
           fi
 
-          # Validar
-          echo "=== mkinitfs check ==="
-          sudo chroot alpine-chroot /bin/sh -c 'command -v mkinitfs && mkinitfs --version || echo "MISSING"'
-          echo "=== modules tree ==="
-          find alpine-chroot/lib/modules -maxdepth 2 -type d 2>/dev/null | sort || echo "(none)"
+          # Validar estructura critica
+          echo "=== Critical files ==="
+          sudo chroot alpine-chroot /bin/sh -c '
+            echo "mkinitfs: $(command -v mkinitfs) $(${0##*/} --version 2>/dev/null)"
+            ls -lh /usr/share/misc/source_deviceinfo /usr/share/deviceinfo/deviceinfo /etc/deviceinfo
+            echo "kernel:"
+            cat /usr/share/kernel/*/kernel.release 2>/dev/null || echo "MISSING"
+            echo "modules:"
+            ls /lib/modules/ 2>/dev/null || echo "MISSING"
+            ls -lh /usr/sbin/mkinitfs
+          '
 
-      - name: Generate initramfs
+      - name: Generate initramfs (preflight + Alpine tools + mkinitfs)
         run: |
-          KVER=$(find pmos-root/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -1)
-          [ -z "$KVER" ] && KVER=$(find alpine-chroot/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -1)
-          echo "KVER=$KVER"
-          [ -z "$KVER" ] && { echo "ERROR: no kernel version found"; exit 1; }
-
-          # Asegurar metadata del kernel para mkinitfs (necesita /usr/share/kernel/*/kernel.release)
-          sudo mkdir -p alpine-chroot/usr/share/kernel
-          if [ -d pmos-root/usr/share/kernel ]; then
-            sudo cp -a pmos-root/usr/share/kernel/. alpine-chroot/usr/share/kernel/
-          else
-            echo "ERROR: pmos-root/usr/share/kernel missing"
-            find pmos-root/usr/share -maxdepth 3 -type f | sort
-            exit 1
-          fi
-          echo "=== kernel metadata installed ==="
-          sudo find alpine-chroot/usr/share/kernel -maxdepth 3 -type f -o -type d | sort
-          sudo find alpine-chroot/usr/share/kernel -name kernel.release -exec sh -c 'echo "-- $1"; cat "$1"' sh {} \;
-
           sudo mkdir -p alpine-chroot/boot
 
-          # Alpine chroot minimal no trae busybox-extras que mkinitfs necesita
-          sudo chroot alpine-chroot /bin/sh -c '
-            apk add --no-cache busybox busybox-extras 2>&1 | tail -3
-          ' 2>/dev/null || true
-
-          # Mkinitfs file lists referencian binarios de postmarketos-base que no
-          # estan en el chroot minimal. Instalar util-linux (losetup real) y crear
-          # stubs para cualquier otro binario faltante en /usr/bin, /usr/sbin, /bin, /sbin.
+          # Instalar Alpine tools reales que mkinitfs/initramfs requieren
           sudo chroot alpine-chroot /bin/sh -c '
             set -eux
-            apk add --no-cache util-linux 2>&1 | tail -5 || true
-            for flist in /usr/share/mkinitfs/files/*.files; do
-              [ -f "$flist" ] || continue
-              grep -Eo "/(usr/)?s?bin/[A-Za-z0-9._+-]+" "$flist" | sort -u | while IFS= read -r fpath; do
-                [ -n "$fpath" ] || continue
-                if [ ! -e "$fpath" ] && [ ! -e "${fpath}.zst" ]; then
-                  echo "Creating stub for: $fpath" >&2
-                  mkdir -p "$(dirname "$fpath")"
-                  echo "#!/bin/sh" > "$fpath"
-                  chmod +x "$fpath"
-                fi
+            apk add --no-cache \
+              busybox busybox-extras \
+              util-linux blkid \
+              kmod e2fsprogs e2fsprogs-extra \
+              zstd xz gzip cpio \
+              2>&1 | tail -20 || true
+
+            # Symlinks para rutas que mkinitfs espera
+            mkdir -p /usr/sbin /usr/bin /sbin /bin
+            for tool in losetup blkid modprobe; do
+              for d in /usr/sbin /sbin; do
+                [ -x "$d/$tool" ] && continue
+                cmd_path=$(command -v "$tool" 2>/dev/null || true)
+                [ -n "$cmd_path" ] && ln -sf "$cmd_path" "$d/$tool" 2>/dev/null || true
               done
             done
           '
 
-          # mkinitfs lee kernel flavor de /usr/share/kernel/*/kernel.release
+          # Preflight: validar TODOS los paths que mkinitfs va a leer
+          sudo chroot alpine-chroot /bin/sh -c '
+            set -eu
+            echo "=== Preflight: mkinitfs file paths ==="
+
+            for flist in /usr/share/mkinitfs/files/*.files; do
+              [ -f "$flist" ] || continue
+              echo "-- checking $(basename $flist)"
+
+              # Extraer todos los paths del file list (quitar coments)
+              sed "s/#.*//" "$flist" |
+              grep -Eo "/[A-Za-z0-9._+/@=-][A-Za-z0-9._+/@=-]*" |
+              sort -u |
+              while IFS= read -r fpath; do
+                [ -n "$fpath" ] || continue
+
+                if [ ! -e "$fpath" ] && [ ! -e "${fpath}.zst" ]; then
+                  case "$fpath" in
+                    /usr/share/misc/source_deviceinfo)
+                      echo "FATAL: $fpath missing" >&2
+                      exit 10
+                      ;;
+                    /usr/share/*|/etc/*)
+                      echo "FATAL: required data file $fpath missing" >&2
+                      exit 11
+                      ;;
+                    /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*)
+                      echo "Creating stub for: $fpath" >&2
+                      mkdir -p "$(dirname "$fpath")"
+                      ln -sf /bin/busybox "$fpath" 2>/dev/null || {
+                        echo "#!/bin/sh" > "$fpath"
+                        chmod +x "$fpath"
+                      }
+                      ;;
+                    *)
+                      echo "WARN: nonstandard missing path: $fpath" >&2
+                      ;;
+                  esac
+                fi
+              done
+            done
+
+            echo "Preflight: PASSED"
+          '
+
+          # Validar source_deviceinfo ANTES de mkinitfs
+          sudo chroot alpine-chroot /bin/sh -c '
+            set -eu
+            echo "=== Validating source_deviceinfo ==="
+            ls -lh /usr/share/misc/source_deviceinfo
+            . /usr/share/misc/source_deviceinfo
+            echo "deviceinfo_arch=$deviceinfo_arch"
+            echo "deviceinfo_codename=$deviceinfo_codename"
+            [ -n "$deviceinfo_arch" ] || { echo "FATAL: deviceinfo_arch empty"; exit 1; }
+          '
+
+          # mkinitfs
           sudo chroot alpine-chroot /bin/sh -c "
             set -eux
-            command -v mkinitfs
-            echo '=== deviceinfo ==='
-            ls -lh /usr/share/deviceinfo/deviceinfo /etc/deviceinfo
-            head -10 /etc/deviceinfo
-            echo '=== kernel metadata ==='
-            find /usr/share/kernel -maxdepth 3 -type f -o -type d | sort
-            echo 'KREL:'
+            . /usr/share/misc/source_deviceinfo
+            echo "=== deviceinfo ==="
+            echo "deviceinfo_codename=\$deviceinfo_codename"
+            echo '=== kernel ==='
             cat /usr/share/kernel/*/kernel.release
             echo '=== modules ==='
             ls /lib/modules/
@@ -383,7 +402,7 @@ jobs:
           fi
 
       # ============================================================
-      # Build boot.img with mkbootimg
+      # Build boot.img with mkbootimg + sanity check
       # ============================================================
       - name: Build boot.img
         run: |
@@ -411,6 +430,17 @@ jobs:
 
           echo "=== Final boot.img ==="
           ls -lh artifacts/boot.img || echo "boot.img not created"
+
+          # Sanity check: boot.img >= kernel + initramfs
+          KERNEL_SIZE=$(stat -c%s artifacts/vmlinuz)
+          INIT_SIZE=$(stat -c%s artifacts/initramfs)
+          BOOT_SIZE=$(stat -c%s artifacts/boot.img)
+          MIN_SIZE=$((KERNEL_SIZE + INIT_SIZE))
+          echo "Kernel: $KERNEL_SIZE | Initramfs: $INIT_SIZE | Boot: $BOOT_SIZE | Min: $MIN_SIZE"
+          if [ "$BOOT_SIZE" -lt "$MIN_SIZE" ]; then
+            echo "ERROR: boot.img smaller than kernel+initramfs - truncated"
+            exit 1
+          fi
 
       - name: Cleanup chroot
         if: always()

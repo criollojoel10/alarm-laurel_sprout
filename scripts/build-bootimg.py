@@ -75,5 +75,14 @@ def main():
         print("WARNING: pmOS_root not in cmdline!")
         sys.exit(1)
 
+    # Sanity check: boot.img >= kernel (+ DTB) + initramfs
+    k_size_file = os.path.getsize(kernel_path)
+    r_size_file = os.path.getsize(initramfs)
+    boot_size = os.path.getsize(output)
+    if boot_size < k_size_file + r_size_file:
+        print(f"ERROR: boot.img ({boot_size:,} B) < kernel ({k_size_file:,} B) + initramfs ({r_size_file:,} B)")
+        sys.exit(1)
+    print(f"Sanity check: ✅ boot.img >= kernel+initramfs ({boot_size:,} >= {k_size_file + r_size_file:,})")
+
 if __name__ == '__main__':
     main()
