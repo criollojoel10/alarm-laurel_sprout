@@ -271,17 +271,32 @@ jobs:
 
           # Asegurar mkinitfs + boot-deploy
           sudo chmod +x alpine-chroot/usr/sbin/mkinitfs 2>/dev/null || true
-          # boot-deploy: si existe en pmos-root, copiarlo al chroot
-          if [ -f pmos-root/usr/sbin/boot-deploy ]; then
-            sudo cp pmos-root/usr/sbin/boot-deploy alpine-chroot/usr/sbin/boot-deploy
-            sudo chmod +x alpine-chroot/usr/sbin/boot-deploy
-            echo "✅ boot-deploy: $(ls -lh alpine-chroot/usr/sbin/boot-deploy | awk '{print $5}')"
+
+          # boot-deploy: esta en /usr/bin/ (shell script que espera functions en /usr/share/boot-deploy/)
+          # Intentar copiar desde pmos-root
+          BD_SRC=""
+          for bd in pmos-root/usr/bin/boot-deploy pmos-root/usr/sbin/boot-deploy; do
+            [ -f "$bd" ] && BD_SRC="$bd" && break
+          done
+          if [ -n "$BD_SRC" ]; then
+            sudo cp "$BD_SRC" alpine-chroot/usr/bin/boot-deploy
+            sudo chmod +x alpine-chroot/usr/bin/boot-deploy
+            sudo ln -sf /usr/bin/boot-deploy alpine-chroot/usr/sbin/boot-deploy
+            # Copiar tambien share/ requerido por boot-deploy (functions, os-customization)
+            for bd_share in pmos-root/usr/share/boot-deploy/*; do
+              [ -f "$bd_share" ] && sudo cp "$bd_share" alpine-chroot/usr/share/boot-deploy/
+            done
+            echo "✅ boot-deploy: $(ls -lh alpine-chroot/usr/bin/boot-deploy | awk '{print $5}')"
           else
             echo "⚠️ boot-deploy binary not found in pmos-root"
             find pmos-root -name "boot-deploy" -type f 2>/dev/null || true
+            # Crear stub minimal que solo copie initramfs
+            printf '#!/bin/sh\n[ -d "$OUTPUT_DIR" ] || mkdir -p "$OUTPUT_DIR"\ncp -a "$WORK_DIR/$INITFS_FILENAME" "$OUTPUT_DIR/"\n' | sudo tee alpine-chroot/usr/bin/boot-deploy > /dev/null
+            sudo chmod +x alpine-chroot/usr/bin/boot-deploy
+            echo "⚠️ Created boot-deploy stub (minimal copy only)"
           fi
 
-          # Asegurar deviceinfo
+          # Tambien asegurar los archivos de boot-deploy en /usr/share/
           DI_SRC="pmos-root/usr/share/deviceinfo/device-xiaomi-laurel"
           [ ! -f "$DI_SRC" ] && DI_SRC="$(find pmos-root/usr/share/deviceinfo -type f | head -1)"
           [ -f "$DI_SRC" ] || { echo "ERROR: no deviceinfo found"; find pmos-root/usr/share/deviceinfo -maxdepth 2 -type f 2>/dev/null || true; exit 1; }
@@ -461,6 +476,10 @@ jobs:
             # boot-deploy copia initramfs del staging a /boot/; sin el kernel,
             # falla y el initramfs nunca se despliega (temp se borra al salir)
             ln -s /bin/busybox /boot/vmlinuz-6.1.0-sm6125 2>/dev/null || touch /boot/vmlinuz-6.1.0-sm6125
+            echo "=== boot-deploy check ==="
+            command -v boot-deploy || echo "boot-deploy NOT in PATH"
+            ls -lh /usr/bin/boot-deploy /usr/sbin/boot-deploy 2>&1 || true
+            ls -lh /usr/share/boot-deploy/ 2>&1 || true
             mkinitfs -d /boot 2>&1 || true
             echo "=== searching for initramfs ==="
             ls -lh /boot/ 2>/dev/null || echo "/boot/ empty"

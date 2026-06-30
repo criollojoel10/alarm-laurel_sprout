@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+import json, sys, re, subprocess
+
+with open('/data/data/com.termux/files/home/.config/gh/hosts.yml') as f:
+    content = f.read()
+    m = re.search(r'oauth_token:\s*(\S+)', content)
+    if not m:
+        print('ERROR: could not find token')
+        sys.exit(1)
+    TOKEN = m.group(1)
+
+result = subprocess.run([
+    'curl', '-sSL',
+    '-H', 'Authorization: Bearer ' + TOKEN,
+    '-H', 'Accept: application/vnd.github.v3+json',
+    'https://api.github.com/repos/criollojoel10/alarm-laurel_sprout/actions/jobs/84367100239/logs'
+], capture_output=True, text=True)
+
+lines = result.stdout.split('\n')
+print(f'Total: {len(lines)}')
+
+# Search for boot-deploy related lines
+for i, line in enumerate(lines):
+    if 'boot-deploy' in line:
+        print(f'L{i}: {line[:300]}')
+
+print()
+print('=== Lines around mkinitfs execution ===')
+for i, line in enumerate(lines):
+    if 'mkinitfs completed' in line:
+        for j in range(max(0,i-10), min(len(lines), i+10)):
+            l = lines[j].strip()
+            if l:
+                print(f'L{j}: {l[:300]}')
+        print()
+        break
+        
+print()
+print('=== preflight boot-deploy check ===')
+for i, line in enumerate(lines):
+    if 'boot-deploy:' in line and ('✅' in line or '⚠️' in line or 'copy' in line or 'found' in line):
+        print(f'L{i}: {line[:300]}')
+
+print()
+print('=== Download boot-deploy ===')
+for i, line in enumerate(lines):
+    if 'Downloading boot-deploy' in line or 'boot-deploy version' in line or 'failed' in line and 'boot-deploy' in line:
+        print(f'L{i}: {line[:300]}')
