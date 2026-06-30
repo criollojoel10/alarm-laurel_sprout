@@ -449,13 +449,18 @@ jobs:
 
           # Copiar initramfs generado
           INITRAMFS_FILE=$(sudo find alpine-chroot/boot -maxdepth 1 -type f -name 'initramfs*' 2>/dev/null | head -1 || true)
+          if [ -z "$INITRAMFS_FILE" ] || [ ! -f "$INITRAMFS_FILE" ]; then
+            # Buscar en todo el chroot (mkinitfs con -no-bootdeploy no copia a /boot/)
+            INITRAMFS_FILE=$(sudo find alpine-chroot -name 'initramfs*' -type f 2>/dev/null | head -1 || true)
+          fi
           if [ -n "$INITRAMFS_FILE" ] && [ -f "$INITRAMFS_FILE" ]; then
             sudo cp "$INITRAMFS_FILE" artifacts/initramfs
             sudo chmod 644 artifacts/initramfs
             echo "Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
           else
-            echo "No initramfs generated in /boot/"
+            echo "No initramfs generated anywhere"
             sudo ls -lh alpine-chroot/boot/ 2>/dev/null || true
+            sudo find alpine-chroot -name initramfs* -type f 2>/dev/null || true
             exit 1
           fi
 
