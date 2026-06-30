@@ -251,11 +251,18 @@ jobs:
           sudo cp -a pmos-root/usr/sbin/mkinitfs alpine-chroot/usr/sbin/mkinitfs
           sudo chmod +x alpine-chroot/usr/sbin/mkinitfs
 
-          # Assets (initramfs, mkinitfs, deviceinfo shares)
+          # Assets necesarios para mkinitfs: initramfs, mkinitfs, postmarketos-mkinitfs, kernel
           sudo mkdir -p alpine-chroot/usr/share
-          for dir in initramfs mkinitfs postmarketos-mkinitfs; do
-            [ -d "pmos-root/usr/share/$dir" ] && sudo cp -a "pmos-root/usr/share/$dir/." "alpine-chroot/usr/share/$dir/" 2>/dev/null || true
+          for dir in initramfs mkinitfs postmarketos-mkinitfs kernel deviceinfo; do
+            if [ -d "pmos-root/usr/share/$dir" ]; then
+              sudo mkdir -p "alpine-chroot/usr/share/$dir"
+              sudo cp -a "pmos-root/usr/share/$dir/." "alpine-chroot/usr/share/$dir/"
+            fi
           done
+          echo "=== kernel metadata in chroot ==="
+          sudo find alpine-chroot/usr/share/kernel -maxdepth 3 -type f -o -type d 2>/dev/null | sort || true
+          echo "=== kernel.release ==="
+          sudo find alpine-chroot/usr/share/kernel -name kernel.release -exec sh -c 'echo "-- $1"; cat "$1"' sh {} \; 2>/dev/null || true
 
           # Device info — mkinitfs requiere archivo (no directorio) en:
           # /usr/share/deviceinfo/deviceinfo  o  /etc/deviceinfo
@@ -296,24 +303,42 @@ jobs:
           echo "KVER=$KVER"
           [ -z "$KVER" ] && { echo "ERROR: no kernel version found"; exit 1; }
 
-          # mkinitfs de pmOS: flags: -d <dir>, -no-bootdeploy. NO acepta -c ni -o.
+          # Asegurar metadata del kernel para mkinitfs (necesita /usr/share/kernel/*/kernel.release)
+          sudo mkdir -p alpine-chroot/usr/share/kernel
+          if [ -d pmos-root/usr/share/kernel ]; then
+            sudo cp -a pmos-root/usr/share/kernel/. alpine-chroot/usr/share/kernel/
+          else
+            echo "ERROR: pmos-root/usr/share/kernel missing"
+            find pmos-root/usr/share -maxdepth 3 -type f | sort
+            exit 1
+          fi
+          echo "=== kernel metadata installed ==="
+          sudo find alpine-chroot/usr/share/kernel -maxdepth 3 -type f -o -type d | sort
+          sudo find alpine-chroot/usr/share/kernel -name kernel.release -exec sh -c 'echo "-- $1"; cat "$1"' sh {} \;
+
           sudo mkdir -p alpine-chroot/boot
+
+          # mkinitfs lee kernel flavor de /usr/share/kernel/*/kernel.release
+          # Si no se pasa KVER, mkinitfs lo detecta desde ahi automaticamente
           sudo chroot alpine-chroot /bin/sh -c "
             set -eux
             command -v mkinitfs
-            echo '=== deviceinfo check ==='
+            echo '=== deviceinfo ==='
             ls -lh /usr/share/deviceinfo/deviceinfo /etc/deviceinfo
             head -10 /etc/deviceinfo
-            echo '=== modules check ==='
-            ls -lh /lib/modules/$KVER
-            ls /lib/modules/ | head -5
-            mkinitfs -d /boot -no-bootdeploy $KVER
-            echo '=== boot dir ==='
+            echo '=== kernel metadata ==='
+            find /usr/share/kernel -maxdepth 3 -type f -o -type d | sort
+            echo 'KREL:'
+            cat /usr/share/kernel/*/kernel.release
+            echo '=== modules ==='
+            ls /lib/modules/
+            mkinitfs -d /boot -no-bootdeploy
+            echo '=== boot ==='
             ls -lh /boot/
           "
 
-          # Encontrar initramfs (mkinitfs nombra initramfs-<kver>)
-          INITRAMFS_FILE="$(sudo find alpine-chroot/boot -maxdepth 1 -type f -name 'initramfs-*' | head -1 || true)"
+          # Copiar initramfs generado
+          INITRAMFS_FILE=$(sudo find alpine-chroot/boot -maxdepth 1 -type f -name 'initramfs*' 2>/dev/null | head -1 || true)
           if [ -n "$INITRAMFS_FILE" ] && [ -f "$INITRAMFS_FILE" ]; then
             sudo cp "$INITRAMFS_FILE" artifacts/initramfs
             sudo chmod 644 artifacts/initramfs
