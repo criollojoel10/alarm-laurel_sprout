@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build boot.img for laurel from kernel + initramfs + DTB."""
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -33,8 +34,13 @@ def main():
         print(f"DTB appended: {os.path.getsize(kernel)} -> {os.path.getsize(tmp_kernel)}")
 
     # Build mkbootimg command
+    # Ubuntu 24.04 apt mkbootimg proporciona /usr/bin/mkbootimg CLI
+    if not shutil.which('mkbootimg'):
+        print('ERROR: mkbootimg not found. Install it: sudo apt install mkbootimg')
+        sys.exit(1)
+
     cmd = [
-        'python3', '-m', 'mkbootimg',
+        'mkbootimg',
         '--kernel', kernel_path,
         '--ramdisk', initramfs,
         '--cmdline', cmdline,
@@ -47,14 +53,12 @@ def main():
         '--header_version', '2',
         '--os_version', '23.0.0',
         '--os_patch_level', '2026-06',
-        '-o', output
+        '--output', output
     ]
-    
+
+    print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
-    print(result.stdout)
-    if result.returncode != 0:
-        print(f"mkbootimg failed: {result.stderr}")
-        sys.exit(1)
+    print(result.stdout or result.stderr)
 
     # Verify
     with open(output, 'rb') as f:

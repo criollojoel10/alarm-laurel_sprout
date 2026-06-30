@@ -27,6 +27,7 @@ jobs:
           sudo apt-get install -y -qq \
             wget xz-utils zstd cpio python3 python3-pip \
             qemu-user-static binfmt-support \
+            mkbootimg \
             --no-install-recommends
 
       # ============================================================
@@ -418,9 +419,6 @@ jobs:
             echo "No initramfs, cannot build boot.img"
             exit 1
           fi
-
-          # Install mkbootimg
-          pip3 install mkbootimg 2>/dev/null || true
 
           # Build boot.img using script
           CMDLINE="root=LABEL=pmOS_root rw rootwait console=ttyMSM0,115200 earlycon=msm_serial_dm,0x00a90000 bootopt=64S3,32N2,64N2 androidboot.bootdevice=7824900.sdhci"
