@@ -251,7 +251,16 @@ jobs:
           sudo cp -a pmos-root/usr/sbin/mkinitfs alpine-chroot/usr/sbin/mkinitfs
           sudo chmod +x alpine-chroot/usr/sbin/mkinitfs
 
-          # Assets necesarios para mkinitfs: initramfs, mkinitfs, postmarketos-mkinitfs, kernel
+          # Copiar todos los binarios de pmOS al chroot (mkinitfs lee file lists
+          # de /usr/share/mkinitfs/files/*.files que referencian /usr/bin/*)
+          if [ -d pmos-root/usr/bin ]; then
+            sudo cp -a pmos-root/usr/bin/. alpine-chroot/usr/bin/ 2>/dev/null || true
+          fi
+          if [ -d pmos-root/usr/sbin ]; then
+            sudo cp -a pmos-root/usr/sbin/. alpine-chroot/usr/sbin/ 2>/dev/null || true
+          fi
+
+          # Assets necesarios para mkinitfs
           sudo mkdir -p alpine-chroot/usr/share
           for dir in initramfs mkinitfs postmarketos-mkinitfs kernel deviceinfo; do
             if [ -d "pmos-root/usr/share/$dir" ]; then
