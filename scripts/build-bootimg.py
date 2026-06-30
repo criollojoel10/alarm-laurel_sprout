@@ -33,14 +33,29 @@ def main():
         kernel_path = tmp_kernel
         print(f"DTB appended: {os.path.getsize(kernel)} -> {os.path.getsize(tmp_kernel)}")
 
-    # Build mkbootimg command
-    # Ubuntu 24.04 apt mkbootimg proporciona /usr/bin/mkbootimg CLI
-    if not shutil.which('mkbootimg'):
-        print('ERROR: mkbootimg not found. Install it: sudo apt install mkbootimg')
-        sys.exit(1)
+    # Ubuntu 24.04 apt mkbootimg falla sin python3-gki (--no-install-recommends
+    # bloquea la dependencia). Usar pip install mkbootimg + python3 -m.
+    try:
+        import mkbootimg
+    except ImportError:
+        print('Installing mkbootimg via pip...')
+        result = subprocess.run(
+            ['pip3', 'install', 'mkbootimg', '--break-system-packages'],
+            capture_output=True, text=True)
+        print(result.stdout[:200] if result.stdout else result.stderr[:200])
+        if result.returncode != 0:
+            result = subprocess.run(
+                ['pip3', 'install', 'mkbootimg'],
+                capture_output=True, text=True)
+            print(result.stdout[:200] if result.stdout else result.stderr[:200])
+        try:
+            import mkbootimg
+        except ImportError:
+            print('ERROR: mkbootimg not available')
+            sys.exit(1)
 
     cmd = [
-        'mkbootimg',
+        'python3', '-m', 'mkbootimg',
         '--kernel', kernel_path,
         '--ramdisk', initramfs,
         '--cmdline', cmdline,
@@ -53,10 +68,10 @@ def main():
         '--header_version', '2',
         '--os_version', '23.0.0',
         '--os_patch_level', '2026-06',
-        '--output', output
+        '-o', output
     ]
 
-    print(f"Running: {' '.join(cmd)}")
+    print(f"Running: python3 -m mkbootimg ...")
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout or result.stderr)
 

@@ -27,7 +27,6 @@ jobs:
           sudo apt-get install -y -qq \
             wget xz-utils zstd cpio python3 python3-pip \
             qemu-user-static binfmt-support \
-            mkbootimg \
             --no-install-recommends
 
       # ============================================================
