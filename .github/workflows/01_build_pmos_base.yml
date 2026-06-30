@@ -442,7 +442,7 @@ jobs:
             cat /usr/share/kernel/*/kernel.release
             echo "=== modules ==="
             ls /lib/modules/
-            mkinitfs -d /boot -no-bootdeploy
+            mkinitfs -d /boot
             echo "=== boot ==="
             ls -lh /boot/
           '
