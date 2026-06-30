@@ -332,15 +332,19 @@ jobs:
             apk add --no-cache busybox busybox-extras 2>&1 | tail -3
           ' 2>/dev/null || true
 
-          # Mkinitfs file lists referencian binarios (iskey, etc.) que no estan
-          # en el chroot. Crear stubs vacios para que no falle.
+          # Mkinitfs file lists referencian binarios de postmarketos-base que no
+          # estan en el chroot minimal. Instalar util-linux (losetup real) y crear
+          # stubs para cualquier otro binario faltante en /usr/bin, /usr/sbin, /bin, /sbin.
           sudo chroot alpine-chroot /bin/sh -c '
             set -eux
+            apk add --no-cache util-linux 2>&1 | tail -5 || true
             for flist in /usr/share/mkinitfs/files/*.files; do
               [ -f "$flist" ] || continue
-              grep -o '\''/usr/bin/[a-z_-]*'\'' "$flist" | sort -u | while IFS= read -r fpath; do
-                if [ ! -f "$fpath" ] && [ ! -f "${fpath}.zst" ]; then
-                  echo "Creating stub: $fpath" >&2
+              grep -Eo "/(usr/)?s?bin/[A-Za-z0-9._+-]+" "$flist" | sort -u | while IFS= read -r fpath; do
+                [ -n "$fpath" ] || continue
+                if [ ! -e "$fpath" ] && [ ! -e "${fpath}.zst" ]; then
+                  echo "Creating stub for: $fpath" >&2
+                  mkdir -p "$(dirname "$fpath")"
                   echo "#!/bin/sh" > "$fpath"
                   chmod +x "$fpath"
                 fi
