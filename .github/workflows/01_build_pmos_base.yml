@@ -379,6 +379,12 @@ jobs:
                       mkdir -p "$(dirname "$fpath")"
                       touch "$fpath"
                       ;;
+                    /usr/lib/*)
+                      # Reglas udev, modaliases, etc. — datos no criticos
+                      echo "Creating empty file: $fpath (lib data, not critical)" >&2
+                      mkdir -p "$(dirname "$fpath")"
+                      touch "$fpath"
+                      ;;
                     /bin/*|/sbin/*|/usr/bin/*|/usr/sbin/*)
                       echo "Creating stub for: $fpath" >&2
                       mkdir -p "$(dirname "$fpath")"

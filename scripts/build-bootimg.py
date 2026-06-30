@@ -33,16 +33,28 @@ def main():
         kernel_path = tmp_kernel
         print(f"DTB appended: {os.path.getsize(kernel)} -> {os.path.getsize(tmp_kernel)}")
 
-    # Asegurar mkbootimg via apt
+    # Asegurar mkbootimg (osm0sis C binary, no apt — bug gki en Ubuntu 24.04)
     if not shutil.which('mkbootimg'):
-        print('Installing mkbootimg via apt...')
-        result = subprocess.run(
-            ['sudo', 'apt-get', 'install', '-y', '-qq', 'mkbootimg'],
+        print('Building osm0sis/mkbootimg from source...')
+        r = subprocess.run(
+            ['git', 'clone', '--depth=1',
+             'https://github.com/osm0sis/mkbootimg.git',
+             '/tmp/mkbootimg-src'],
             capture_output=True, text=True)
-        print(result.stdout[:300] if result.stdout else result.stderr[:300])
-        if result.returncode != 0:
-            print('ERROR: apt install mkbootimg failed')
+        if r.returncode != 0:
+            print(f'git clone failed: {r.stderr[:200]}')
             sys.exit(1)
+        r = subprocess.run(
+            ['make', '-C', '/tmp/mkbootimg-src'],
+            capture_output=True, text=True)
+        print(r.stdout[:200] if r.stdout else r.stderr[:200])
+        r = subprocess.run(
+            ['sudo', 'cp', '/tmp/mkbootimg-src/mkbootimg',
+             '/usr/local/bin/mkbootimg'],
+            capture_output=True, text=True)
+        r = subprocess.run(
+            ['sudo', 'chmod', '+x', '/usr/local/bin/mkbootimg'],
+            capture_output=True, text=True)
 
     if not shutil.which('mkbootimg'):
         print('ERROR: mkbootimg not available')
