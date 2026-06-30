@@ -284,20 +284,28 @@ jobs:
           echo "KVER=$KVER"
           [ -z "$KVER" ] && { echo "ERROR: no kernel version found"; exit 1; }
 
-          sudo mkdir -p alpine-chroot/boot alpine-chroot/etc/mkinitfs
-          echo 'features="base ext4 mmc scsi usb kms"' | sudo tee alpine-chroot/etc/mkinitfs/mkinitfs.conf > /dev/null
-
-          # Generate initramfs with set -e for early failure
+          # mkinitfs de pmOS es Go: flags: -d <dir> (default /boot), -no-bootdeploy
+          # NO acepta -c (config) ni -o (output). Kernel version es positional.
+          sudo mkdir -p alpine-chroot/boot
           sudo chroot alpine-chroot /bin/sh -c "
             set -eux
             command -v mkinitfs
-            ls -la /lib/modules/$KVER
-            mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o /boot/initramfs-laurel $KVER
-            ls -lh /boot/initramfs-laurel
+            ls /lib/modules/ | head -5
+            mkinitfs -d /boot $KVER
+            ls -lh /boot/initramfs-laurel || ls -lh /boot/initramfs-* 2>/dev/null || echo 'checking...'
+            ls -lh /boot/
           "
 
-          cp alpine-chroot/boot/initramfs-laurel artifacts/initramfs
-          echo "Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
+          # Encontrar initramfs generado (mkinitfs nombra initramfs-<kver>)
+          INITRAMFS_FILE=$(sudo ls alpine-chroot/boot/initramfs-* 2>/dev/null | head -1 || true)
+          if [ -n "$INITRAMFS_FILE" ] && [ -f "$INITRAMFS_FILE" ]; then
+            sudo cp "$INITRAMFS_FILE" artifacts/initramfs
+            echo "Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
+          else
+            echo "No initramfs generated in /boot/"
+            sudo ls -lh alpine-chroot/boot/ 2>/dev/null || true
+            exit 1
+          fi
 
       # ============================================================
       # Build boot.img with mkbootimg
