@@ -3,130 +3,190 @@ name: "01 — Build pmOS base for laurel_sprout"
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * 1"  # Weekly Monday 06:00 UTC
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: write
 
 env:
   DEVICE: xiaomi-laurel
-  KERNEL_PKG: linux-postmarketos-qcom-sm6125
-  UI: console
+  PMOS_MIRROR: "https://mirror.postmarketos.org/postmarketos/main"
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install deps
+      - name: Set up Docker + QEMU for aarch64
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            coreutils findutils util-linux e2fsprogs \
-            xz-utils zstd python3 file \
-            qemu-user-static binfmt-support \
-            android-sdk-libsparse-utils \
-            --no-install-recommends
+          sudo apt-get install -y -qq qemu-user-static binfmt-support docker.io --no-install-recommends
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-      # ============================================================
-      # pmbootstrap setup
-      # ============================================================
-      - name: Install pmbootstrap
+      - name: Build pmOS base image
         run: |
-          sudo apt-get install -y -qq git openssl 2>/dev/null || true
-          git clone --depth 1 https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git /tmp/pmbootstrap
-          pip install -e /tmp/pmbootstrap 2>&1 | tail -5
-          pmbootstrap --version
+          mkdir -p /tmp/pmos-builder
+          cat > /tmp/pmos-builder/Dockerfile << 'DOCKERFILE'
+          FROM arm64v8/alpine:edge
 
-      - name: Configure pmbootstrap
+          # Add pmOS repository mirror
+          RUN echo "https://mirror.postmarketos.org/postmarketos/main" >> /etc/apk/repositories
+
+          # Add pmOS signing key
+          RUN wget -q "https://mirror.postmarketos.org/build.postmarketos.org.rsa.pub" \
+              -O /etc/apk/keys/build.postmarketos.org.rsa.pub && \
+              apk update
+
+          # Install kernel + device + base packages
+          RUN apk add --no-cache \
+              linux-postmarketos-qcom-sm6125 \
+              device-xiaomi-laurel \
+              postmarketos-base-core \
+              postmarketos-mkinitfs \
+              mkbootimg-osm0sis \
+              linux-firmware-qcom \
+              devicepkg-dev \
+              2>&1
+
+          # Generate initramfs
+          RUN KVER=$(ls /lib/modules/ | head -1) && \
+              echo "Kernel: $KVER" && \
+              mkinitfs -o /boot/initramfs.img "$KVER" && \
+              ls -lh /boot/initramfs.img
+
+          # Create output script
+          RUN mkdir -p /output
+          DOCKERFILE
+
+          docker buildx build \
+            --platform linux/arm64 \
+            -t pmos-laurel-builder \
+            /tmp/pmos-builder/ 2>&1
+
+      - name: Extract artifacts from Docker image
         run: |
-          # Non-interactive config for xiaomi-laurel
-          pmbootstrap init \
-            --device "${{ env.DEVICE }}" \
-            --ui "${{ env.UI }}" \
-            --non-interactive \
-            --details-to-stdout 2>&1 | tail -20
-
-          # Verify config
-          cat ~/.config/pmbootstrap.cfg 2>/dev/null | head -30 || true
-
-      - name: Build kernel package
-        run: |
-          pmbootstrap build "${{ env.KERNEL_PKG }}" --details-to-stdout 2>&1 | tail -20
-
-      - name: Build device package
-        run: |
-          pmbootstrap build "device-${{ env.DEVICE }}" --details-to-stdout 2>&1 | tail -10
-
-      - name: Install to image
-        run: |
-          pmbootstrap install --no-base --disk-size 8G --details-to-stdout 2>&1 | tail -20
-
-      # ============================================================
-      # Extract artifacts
-      # ============================================================
-      - name: Extract boot.img
-        run: |
-          # Find the generated image
-          IMG_DIR="$HOME/.local/var/pmbootstrap/chroot_native/home/pmos/rootfs"
-          IMG=$(find "$IMG_DIR" -name "*.img" 2>/dev/null | head -1)
-
-          if [ -z "$IMG" ]; then
-            # Try alternative paths
-            IMG=$(find / -path "*/pmbootstrap/*" -name "*.img" 2>/dev/null | head -1)
-          fi
-
-          if [ -z "$IMG" ]; then
-            echo "Looking for image using pmbootstrap status..."
-            pmbootstrap status 2>&1 | grep -i image || true
-            IMG=$(pmbootstrap status 2>&1 | grep -oP '/[^ ]+\.img' | head -1)
-          fi
-
-          if [ -z "$IMG" ]; then
-            echo "Trying work dir..."
-            ls -la "$HOME/.local/var/pmbootstrap/" 2>/dev/null || true
-            IMG=$(find "$HOME/.local/var/pmbootstrap" -name "*.img" 2>/dev/null | head -1)
-          fi
-
-          echo "Found image: $IMG"
-          [ -z "$IMG" ] && { echo "❌ No image found"; exit 1; }
-
-          ls -lh "$IMG"
           mkdir -p pmos-artifacts
 
-          # Extract boot.img from the flashed image
-          # On Qualcomm devices, boot is a separate partition within the image
-          # pmbootstrap creates a full image: first partition = boot, second = root
-          python3 scripts/scan-extract-fs.py "$IMG" pmos-artifacts
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}/pmos-artifacts:/output \
+            pmos-laurel-builder \
+            bash -c '
+              set -e
+              KVER=$(ls /lib/modules/ | head -1)
+              echo "Kernel: $KVER"
 
-      - name: Package artifacts
+              # Find kernel (vmlinuz / Image)
+              VMLINUZ=$(find /boot -name "vmlinuz*" -o -name "Image*" 2>/dev/null | head -1)
+              if [ -z "$VMLINUZ" ]; then
+                VMLINUZ=$(find /lib/modules -name "vmlinuz*" -o -name "Image*" 2>/dev/null | head -1)
+              fi
+              if [ -z "$VMLINUZ" ]; then
+                # Extract from the kernel package
+                VMLINUZ="/lib/modules/$KVER/vmlinuz"
+                [ -f "$VMLINUZ" ] || VMLINUZ=""
+              fi
+              echo "Kernel: $VMLINUZ ($(ls -lh $VMLINUZ 2>/dev/null | awk "{print \$5}"))"
+
+              # Initramfs
+              INITRAMFS=$(find /boot -name "initramfs*" 2>/dev/null | head -1)
+              echo "Initramfs: $INITRAMFS ($(ls -lh $INITRAMFS 2>/dev/null | awk "{print \$5}"))"
+
+              # DTB
+              DTB=$(find /lib/modules/$KVER/dtbs -name "*laurel*" 2>/dev/null | head -1)
+              [ -z "$DTB" ] && DTB=$(find /lib/modules/$KVER/dtbs -name "*.dtb" 2>/dev/null | head -1)
+              echo "DTB: $DTB ($(ls -lh $DTB 2>/dev/null | awk "{print \$5}"))"
+
+              # Get cmdline from deviceinfo
+              CMDLINE=$(grep "^deviceinfo_kernel_cmdline" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "")
+              [ -z "$CMDLINE" ] && CMDLINE="clk_ignore_unused"
+              echo "Cmdline: $CMDLINE"
+
+              # Get boot image parameters
+              BASE=$(grep "^deviceinfo_flash_offset_base" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x00000000")
+              KOFF=$(grep "^deviceinfo_flash_offset_kernel" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x00008000")
+              ROFF=$(grep "^deviceinfo_flash_offset_ramdisk" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x01000000")
+              SOFF=$(grep "^deviceinfo_flash_offset_second" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x00f00000")
+              TOFF=$(grep "^deviceinfo_flash_offset_tags" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "0x00000100")
+              PGSZ=$(grep "^deviceinfo_flash_pagesize" /usr/share/deviceinfo/deviceinfo 2>/dev/null | cut -d= -f2- | tr -d "\"" || echo "4096")
+              APPEND_DTB=$(grep "^deviceinfo_append_dtb" /usr/share/deviceinfo/deviceinfo 2>/dev/null | grep -qi "true" && echo "true" || echo "false")
+
+              echo "Boot params: base=$BASE koff=$KOFF roff=$ROFF soff=$SOFF toff=$TOFF pgsz=$PGSZ append_dtb=$APPEND_DTB"
+
+              # Append DTB to kernel if needed
+              if [ "$APPEND_DTB" = "true" ] && [ -n "$DTB" ] && [ -f "$DTB" ]; then
+                cat "$VMLINUZ" "$DTB" > /tmp/kernel-dtb.img
+                KERNEL_PATH="/tmp/kernel-dtb.img"
+                echo "DTB appended to kernel"
+              else
+                KERNEL_PATH="$VMLINUZ"
+              fi
+
+              # Build boot.img
+              if [ -f "$KERNEL_PATH" ] && [ -f "$INITRAMFS" ]; then
+                mkbootimg \
+                  --kernel "$KERNEL_PATH" \
+                  --ramdisk "$INITRAMFS" \
+                  --dtb "$DTB" \
+                  --cmdline "$CMDLINE" \
+                  --base "$BASE" \
+                  --kernel_offset "$KOFF" \
+                  --ramdisk_offset "$ROFF" \
+                  --second_offset "$SOFF" \
+                  --tags_offset "$TOFF" \
+                  --pagesize "$PGSZ" \
+                  --os_version 22.0.0 \
+                  --os_patch_level 2026-06 \
+                  -o /output/boot.img 2>&1
+                echo "=== boot.img ==="
+                ls -lh /output/boot.img
+              else
+                echo "❌ Missing files"
+                echo "Kernel exists: $([ -f "$KERNEL_PATH" ] && echo yes || echo no)"
+                echo "Initramfs exists: $([ -f "$INITRAMFS" ] && echo yes || echo no)"
+                exit 1
+              fi
+
+              # Copy kernel and modules for later use (Arch build)
+              cp "$VMLINUZ" /output/vmlinuz 2>/dev/null || true
+              cp "$INITRAMFS" /output/initramfs.img 2>/dev/null || true
+              [ -n "$DTB" ] && cp "$DTB" /output/ 2>/dev/null || true
+              tar -czf /output/modules.tar.gz -C /lib modules/ 2>/dev/null || true
+              tar -czf /output/firmware.tar.gz -C /lib firmware/ 2>/dev/null || true
+              cp /usr/share/deviceinfo/deviceinfo /output/deviceinfo 2>/dev/null || true
+
+              echo ""
+              echo "=== /output contents ==="
+              ls -lh /output/
+            '
+
+      - name: Verify boot.img
         run: |
-          cd pmos-artifacts
-          ls -lh
-          # If boot.img exists from scan, use it
-          if [ -f "boot.img" ]; then
-            cp boot.img "${{ github.workspace }}/boot.img"
-          fi
-          # Package modules and firmware
-          if [ -d "lib" ]; then
-            tar -czf "${{ github.workspace }}/modules-${{ env.DEVICE }}.tar.gz" lib/
-          fi
-          if [ -f "vmlinuz" ]; then
-            cp vmlinuz "${{ github.workspace }}/vmlinuz"
-          fi
-          cd "${{ github.workspace }}"
           echo "=== Artifacts ==="
-          ls -lh boot.img vmlinuz modules-${{ env.DEVICE }}.tar.gz 2>/dev/null || true
+          ls -lh pmos-artifacts/
+
+          python3 -c "
+          import struct
+          with open('pmos-artifacts/boot.img', 'rb') as f:
+              data = f.read(576)
+          magic = data[0:8].decode('ascii', errors='replace')
+          cmdline = data[64:576].rstrip(b'\x00').decode('ascii', 'replace')
+          print(f'Magic: {magic} ✅')
+          print(f'Cmdline: {cmdline}')
+          print(f'root= present: {\"root=\" in cmdline}')
+          print(f'pmOS boot label: {\"pmOS_root\" in cmdline or \"pmOS_boot\" in cmdline}')
+
+          r_size = struct.unpack('<I', data[16:20])[0]
+          k_size = struct.unpack('<I', data[8:12])[0]
+          print(f'Ramdisk: {r_size:,} B')
+          print(f'Kernel: {k_size:,} B')
+          "
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: pmos-base-${{ env.DEVICE }}
-          path: |
-            boot.img
-            vmlinuz
-            modules-${{ env.DEVICE }}.tar.gz
-          retention-days: 7
+          path: pmos-artifacts/
+          retention-days: 90
