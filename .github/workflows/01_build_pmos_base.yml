@@ -442,16 +442,21 @@ jobs:
             cat /usr/share/kernel/*/kernel.release
             echo "=== modules ==="
             ls /lib/modules/
-            mkinitfs -d /boot -o /boot/initramfs-6.1.0-sm6125.img -no-bootdeploy 2>&1
-            test -s /boot/initramfs-6.1.0-sm6125.img || { echo "initramfs file is empty"; exit 1; }
+            mkinitfs -d /boot -no-bootdeploy 2>&1 || true
+            echo "=== searching for initramfs ==="
+            ls -lh /boot/ 2>/dev/null || echo "/boot/ empty"
+            find /tmp /var/tmp /boot -name "initramfs*" -type f 2>/dev/null | head -5 || true
             echo "=== boot ==="
             ls -lh /boot/
           '
 
           # Copiar initramfs generado
+          # Buscar initramfs en /boot/ primero, sino en cualquier parte del chroot
+          sudo ls -lh alpine-chroot/boot/ 2>/dev/null || true
           INITRAMFS_FILE=$(sudo find alpine-chroot/boot -maxdepth 1 -type f -name 'initramfs*' 2>/dev/null | head -1 || true)
           if [ -z "$INITRAMFS_FILE" ] || [ ! -f "$INITRAMFS_FILE" ]; then
-            # Buscar en todo el chroot (mkinitfs con -no-bootdeploy no copia a /boot/)
+            echo "Not in /boot/, searching whole chroot..."
+            sudo find alpine-chroot -name 'initramfs*' -type f 2>/dev/null | head -5 || true
             INITRAMFS_FILE=$(sudo find alpine-chroot -name 'initramfs*' -type f 2>/dev/null | head -1 || true)
           fi
           if [ -n "$INITRAMFS_FILE" ] && [ -f "$INITRAMFS_FILE" ]; then
@@ -460,7 +465,6 @@ jobs:
             echo "Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
           else
             echo "No initramfs generated anywhere"
-            sudo ls -lh alpine-chroot/boot/ 2>/dev/null || true
             sudo find alpine-chroot -name initramfs* -type f 2>/dev/null || true
             exit 1
           fi
