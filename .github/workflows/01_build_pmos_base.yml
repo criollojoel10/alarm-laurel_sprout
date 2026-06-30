@@ -375,19 +375,19 @@ jobs:
           '
 
           # mkinitfs
-          sudo chroot alpine-chroot /bin/sh -c "
+          sudo chroot alpine-chroot /bin/sh -c '
             set -eux
             . /usr/share/misc/source_deviceinfo
             echo "=== deviceinfo ==="
-            echo "deviceinfo_codename=\$deviceinfo_codename"
-            echo '=== kernel ==='
+            echo "deviceinfo_codename=$deviceinfo_codename"
+            echo "=== kernel ==="
             cat /usr/share/kernel/*/kernel.release
-            echo '=== modules ==='
+            echo "=== modules ==="
             ls /lib/modules/
             mkinitfs -d /boot -no-bootdeploy
-            echo '=== boot ==='
+            echo "=== boot ==="
             ls -lh /boot/
-          "
+          '
 
           # Copiar initramfs generado
           INITRAMFS_FILE=$(sudo find alpine-chroot/boot -maxdepth 1 -type f -name 'initramfs*' 2>/dev/null | head -1 || true)
