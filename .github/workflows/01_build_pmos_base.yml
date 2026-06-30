@@ -361,8 +361,9 @@ jobs:
                         mkdir -p "$(dirname "$fpath")"
                         cp "/usr/share/initramfs/$base" "$fpath"
                       else
-                        echo "FATAL: $fpath missing (no /usr/share/initramfs/$base fallback)" >&2
-                        exit 11
+                        echo "Creating empty file: $fpath (not shipped by current pmOS pkgs)" >&2
+                        mkdir -p "$(dirname "$fpath")"
+                        touch "$fpath"
                       fi
                       ;;
                     /usr/share/*)
