@@ -298,6 +298,20 @@ jobs:
         run: |
           sudo mkdir -p alpine-chroot/boot
 
+          # ============================================================
+          # Assets runtime esperados por mkinitfs/postmarketos-initramfs
+          # ============================================================
+          sudo mkdir -p alpine-chroot/etc
+          if [ -f pmos-root/usr/share/initramfs/mdev.conf ]; then
+            sudo cp pmos-root/usr/share/initramfs/mdev.conf alpine-chroot/etc/mdev.conf
+            echo "✅ mdev.conf installed"
+          else
+            echo "ERROR: pmos-root/usr/share/initramfs/mdev.conf missing"
+            find pmos-root/usr/share/initramfs -maxdepth 1 -type f -print || true
+            exit 1
+          fi
+          sudo ls -lh alpine-chroot/etc/mdev.conf
+
           # Instalar Alpine tools reales que mkinitfs/initramfs requieren
           sudo chroot alpine-chroot /bin/sh -c '
             set -eux
@@ -341,7 +355,18 @@ jobs:
                       echo "FATAL: $fpath missing" >&2
                       exit 10
                       ;;
-                    /usr/share/*|/etc/*)
+                    /etc/*)
+                      base="$(basename "$fpath")"
+                      if [ -f "/usr/share/initramfs/$base" ]; then
+                        echo "Copying initramfs asset: /usr/share/initramfs/$base -> $fpath" >&2
+                        mkdir -p "$(dirname "$fpath")"
+                        cp "/usr/share/initramfs/$base" "$fpath"
+                      else
+                        echo "FATAL: $fpath missing (no /usr/share/initramfs/$base fallback)" >&2
+                        exit 11
+                      fi
+                      ;;
+                    /usr/share/*)
                       echo "FATAL: required data file $fpath missing" >&2
                       exit 11
                       ;;
