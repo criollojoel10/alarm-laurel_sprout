@@ -33,29 +33,27 @@ def main():
         kernel_path = tmp_kernel
         print(f"DTB appended: {os.path.getsize(kernel)} -> {os.path.getsize(tmp_kernel)}")
 
-    # Ubuntu 24.04 apt mkbootimg falla sin python3-gki (--no-install-recommends
-    # bloquea la dependencia). Usar pip install mkbootimg + python3 -m.
-    try:
-        import mkbootimg
-    except ImportError:
-        print('Installing mkbootimg via pip...')
+    # Asegurar mkbootimg via apt (incluye python3-gki como dependencia)
+    if not shutil.which('mkbootimg'):
+        print('Installing mkbootimg via apt...')
         result = subprocess.run(
-            ['pip3', 'install', 'mkbootimg', '--break-system-packages'],
+            ['sudo', 'apt-get', 'install', '-y', '-qq', 'mkbootimg'],
             capture_output=True, text=True)
-        print(result.stdout[:200] if result.stdout else result.stderr[:200])
+        print(result.stdout[:300] if result.stdout else result.stderr[:300])
         if result.returncode != 0:
-            result = subprocess.run(
-                ['pip3', 'install', 'mkbootimg'],
+            # Fallback: pip (poco probable que funcione pero intentamos)
+            print('apt failed, trying pip...')
+            r2 = subprocess.run(
+                ['pip3', 'install', 'mkbootimg', '--break-system-packages'],
                 capture_output=True, text=True)
-            print(result.stdout[:200] if result.stdout else result.stderr[:200])
-        try:
-            import mkbootimg
-        except ImportError:
-            print('ERROR: mkbootimg not available')
-            sys.exit(1)
+            print(r2.stdout[:200] if r2.stdout else r2.stderr[:200])
+
+    if not shutil.which('mkbootimg'):
+        print('ERROR: mkbootimg not available')
+        sys.exit(1)
 
     cmd = [
-        'python3', '-m', 'mkbootimg',
+        'mkbootimg',
         '--kernel', kernel_path,
         '--ramdisk', initramfs,
         '--cmdline', cmdline,
@@ -68,10 +66,10 @@ def main():
         '--header_version', '2',
         '--os_version', '23.0.0',
         '--os_patch_level', '2026-06',
-        '-o', output
+        '--output', output
     ]
 
-    print(f"Running: python3 -m mkbootimg ...")
+    print(f"Running: mkbootimg ...")
     result = subprocess.run(cmd, capture_output=True, text=True)
     print(result.stdout or result.stderr)
 

@@ -319,6 +319,7 @@ jobs:
               util-linux blkid \
               kmod e2fsprogs e2fsprogs-extra \
               zstd xz gzip cpio \
+              eudev \
               2>&1 | tail -20 || true
 
             # Symlinks para rutas que mkinitfs espera
@@ -337,7 +338,7 @@ jobs:
             set -eu
             echo "=== Preflight: mkinitfs file paths ==="
 
-            for flist in /usr/share/mkinitfs/files/*.files; do
+            for flist in /usr/share/mkinitfs/files/*.files /usr/share/mkinitfs/files-extra/*.files; do
               [ -f "$flist" ] || continue
               echo "-- checking $(basename $flist)"
 
