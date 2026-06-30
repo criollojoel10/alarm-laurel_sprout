@@ -24,123 +24,106 @@ jobs:
       # ============================================================
       # Download and extract pmOS base packages directly
       # .apk = tar.gz with signature. We extract only the data.
+      # No Alpine chroot needed — we just need kernel + modules + DTB.
       # ============================================================
       - name: Download and extract pmOS packages
         run: |
           PMOS_MIRROR="https://mirror.postmarketos.org/postmarketos/main/aarch64"
           mkdir -p pmos-pkgs pmos-root
 
-          # Download APKINDEX to find exact filenames
+          # Download APKINDEX
           wget -q "$PMOS_MIRROR/APKINDEX.tar.gz" -O pmos-pkgs/APKINDEX.tar.gz
 
-          # Find exact package filenames
-          KERNEL_APK=$(tar -xzf pmos-pkgs/APKINDEX.tar.gz -O APKINDEX 2>/dev/null | grep -A2 "^P:linux-postmarketos-qcom-sm6125$" | grep "^V:" | head -1 | awk '{print $2}')
-          echo "Kernel version: $KERNEL_APK"
-          KERNEL_FILE=$(find pmos-pkgs -name "linux-postmarketos-qcom-sm6125-*" 2>/dev/null | head -1)
-
-          # Download kernel package
-          KERNEL_PKG="linux-postmarketos-qcom-sm6125-${KERNEL_APK}.apk"
-          echo "Downloading: $KERNEL_PKG"
-          wget -q "$PMOS_MIRROR/$KERNEL_PKG" -O pmos-pkgs/$KERNEL_PKG 2>&1 || {
-            # Try without version suffix
-            wget -q "$PMOS_MIRROR/linux-postmarketos-qcom-sm6125.apk" -O pmos-pkgs/linux-postmarketos-qcom-sm6125.apk 2>&1 || true
+          # Get version from APKINDEX: find P: then read V:
+          grep_ver() {
+            tar -xzf pmos-pkgs/APKINDEX.tar.gz -O APKINDEX 2>/dev/null | \
+              grep -A1 "^P:$1$" | grep "^V:" | sed 's/^V://'
           }
 
-          # Download device package  
-          DEVICE_APK=$(tar -xzf pmos-pkgs/APKINDEX.tar.gz -O APKINDEX 2>/dev/null | grep -A2 "^P:device-xiaomi-laurel$" | grep "^V:" | head -1 | awk '{print $2}')
-          echo "Device version: $DEVICE_APK"
-          DEVICE_PKG="device-xiaomi-laurel-${DEVICE_APK}.apk"
-          wget -q "$PMOS_MIRROR/$DEVICE_PKG" -O pmos-pkgs/$DEVICE_PKG 2>&1 || {
-            wget -q "$PMOS_MIRROR/device-xiaomi-laurel.apk" -O pmos-pkgs/device-xiaomi-laurel.apk 2>&1 || true
-          }
+          KERNEL_VER=$(grep_ver "linux-postmarketos-qcom-sm6125")
+          echo "Kernel version: $KERNEL_VER"
+          [ -z "$KERNEL_VER" ] && { echo "❌ Kernel not found in APKINDEX"; exit 1; }
+          KERNEL_PKG="linux-postmarketos-qcom-sm6125-${KERNEL_VER}.apk"
 
-          # Download firmware (optional, for Qualcomm Wi-Fi/Bluetooth)
-          FIRMWARE_PKG="linux-firmware-qcom-20260110-r1.apk"
-          wget -q "$PMOS_MIRROR/$FIRMWARE_PKG" -O pmos-pkgs/$FIRMWARE_PKG 2>&1 || true
+          DEVICE_VER=$(grep_ver "device-xiaomi-laurel")
+          echo "Device version: $DEVICE_VER"
+          [ -z "$DEVICE_VER" ] && { echo "❌ Device not found in APKINDEX"; exit 1; }
+          DEVICE_PKG="device-xiaomi-laurel-${DEVICE_VER}.apk"
 
-          echo "=== Downloaded packages ==="
+          # Download packages
+          for pkg in "$KERNEL_PKG" "$DEVICE_PKG"; do
+            echo "Downloading: $pkg"
+            wget -q "$PMOS_MIRROR/$pkg" -O "pmos-pkgs/$pkg" || {
+              echo "❌ Failed: $pkg"
+              exit 1
+            }
+          done
+
+          # Download firmware
+          wget -q "$PMOS_MIRROR/linux-firmware-qcom-20260110-r1.apk" \
+            -O pmos-pkgs/linux-firmware-qcom.apk 2>/dev/null && echo "✅ firmware" || echo "⚠️ no firmware"
+
+          echo "=== Packages ==="
           ls -lh pmos-pkgs/
 
-          # Extract kernel .apk (skip .SIGN.RSA., .PKGINFO, extract everything else)
+          # Extract .apk files (skip signature/PKGINFO)
           for apk in pmos-pkgs/*.apk; do
-            echo "Extracting: $apk"
-            # .apk = .tar.gz with .SIGN.RSA. and .PKGINFO at start
-            # Skip the first two entries (signature + PKGINFO)
-            tar -xzf "$apk" --skip-old-files -C pmos-root 2>/dev/null || {
-              # Alternative: extract all, we don't care about signature files
-              tar -xzf "$apk" -C pmos-root 2>/dev/null || true
-            }
+            echo "Extracting: $(basename $apk)"
+            tar -xzf "$apk" -C pmos-root 2>/dev/null || true
           done
 
           echo "=== Extracted files ==="
           find pmos-root -type f | head -30
-          echo "..."
-          find pmos-root -type f | wc -l
+          echo "... total: $(find pmos-root -type f | wc -l)"
 
       # ============================================================
-      # Identify kernel, DTB, modules, firmware
+      # Package artifacts
       # ============================================================
-      - name: Identify artifacts
+      - name: Package artifacts
         run: |
           mkdir -p artifacts
 
-          # Find kernel Image
-          KERNEL=$(find pmos-root -name "Image.gz" -o -name "Image" -o -name "vmlinuz*" 2>/dev/null | head -1)
-          if [ -z "$KERNEL" ]; then
-            KERNEL=$(find pmos-root -name "*.gz" -path "*/boot/*" | head -1)
-          fi
-          if [ -f "$KERNEL" ]; then
+          # Kernel Image
+          KERNEL=$(find pmos-root -name "Image.gz" -o -name "Image" -o -name "vmlinuz*" | head -1)
+          if [ -n "$KERNEL" ]; then
             cp "$KERNEL" artifacts/kernel-Image.gz
-            echo "✅ Kernel: $KERNEL ($(ls -lh $KERNEL | awk '{print $5}'))"
+            echo "✅ Kernel: $(ls -lh $KERNEL | awk '{print $5}')"
           else
-            echo "❌ No kernel found"
-            find pmos-root -type f -name "*.gz" | head -10
+            echo "❌ No kernel"
+            find pmos-root -name "*.gz" | head -10
+            exit 1
           fi
 
-          # Find kernel version
-          KVER=$(ls pmos-root/lib/modules/ 2>/dev/null | head -1)
-          if [ -z "$KVER" ]; then
-            KVER=$(ls pmos-root/usr/lib/modules/ 2>/dev/null | head -1)
-          fi
-          echo "Kernel version: $KVER"
-          echo "$KVER" > artifacts/kernel-version.txt
+          # Kernel version
+          KVER=$(ls pmos-root/lib/modules/ 2>/dev/null || ls pmos-root/usr/lib/modules/ 2>/dev/null | head -1)
+          echo "KVER=$KVER" >> $GITHUB_ENV
+          echo "Kernel: $KVER"
 
-          # Find DTB
-          DTB_BASE="pmos-root/usr/lib/modules"
-          if [ ! -d "$DTB_BASE" ]; then
-            DTB_BASE="pmos-root/lib/modules"
+          # Modules
+          for d in pmos-root/usr/lib/modules pmos-root/lib/modules; do
+            [ -d "$d/$KVER" ] && MOD_DIR="$d/$KVER" && break
+          done
+          if [ -n "$MOD_DIR" ]; then
+            tar -czf artifacts/modules-laurel.tar.gz -C "$(dirname $MOD_DIR)" "$KVER"
+            echo "✅ Modules: $(du -sh artifacts/modules-laurel.tar.gz | awk '{print $1}')"
           fi
-          DTB=$(find "$DTB_BASE/$KVER/dtbs" -name "*.dtb" 2>/dev/null | head -1)
+
+          # DTB
+          DTB=$(find pmos-root -name "*.dtb" | head -1)
           if [ -n "$DTB" ]; then
             cp "$DTB" artifacts/device.dtb
             echo "✅ DTB: $DTB"
-          else
-            echo "⚠️ No DTB found"
           fi
 
-          # Package modules
-          MOD_DIR="pmos-root/usr/lib/modules"
-          [ -d "$MOD_DIR" ] || MOD_DIR="pmos-root/lib/modules"
-          if [ -d "$MOD_DIR/$KVER" ]; then
-            tar -czf artifacts/modules-laurel.tar.gz -C "$MOD_DIR" "$KVER"
-            echo "✅ Modules packaged: $(du -sh artifacts/modules-laurel.tar.gz | awk '{print $1}')"
-          fi
-
-          # Package firmware
-          FW_DIR="pmos-root/lib/firmware"
-          if [ -d "$FW_DIR" ]; then
-            tar -czf artifacts/firmware-laurel.tar.gz -C "$FW_DIR" .
-            echo "✅ Firmware packaged: $(du -sh artifacts/firmware-laurel.tar.gz | awk '{print $1}')"
-          fi
-
-          # Copy deviceinfo
-          DI=$(find pmos-root -name "deviceinfo" 2>/dev/null | head -1)
+          # Device info
+          DI=$(find pmos-root -name "deviceinfo" | head -1)
           if [ -n "$DI" ]; then
             cp "$DI" artifacts/deviceinfo
+            echo "=== deviceinfo ==="
             cat artifacts/deviceinfo
           fi
 
-          echo "=== Artifacts ==="
+          echo "=== artifacts ==="
           ls -lh artifacts/
 
       - name: Upload artifacts
