@@ -207,17 +207,15 @@ jobs:
           # ============================================================
       - name: Setup Alpine chroot for initramfs
         run: |
-          # We need Alpine's apk tool and mkinitfs to generate the initramfs
-          # Use a minimal Alpine aarch64 rootfs
-          ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/edge/releases/aarch64"
-          ALPINE_ROOTFS="alpine-minirootfs-latest-aarch64.tar.gz"
-
-          # Try to find the latest minirootfs
-          curl -sL "$ALPINE_URL/" | grep -o 'alpine-minirootfs-[0-9.]*-aarch64.tar.gz' | head -1 > ~/alpine-version.txt
-          ALPINE_FILE=$(cat ~/alpine-version.txt)
-          if [ -z "$ALPINE_FILE" ]; then
-            ALPINE_FILE="alpine-minirootfs-3.21.3-aarch64.tar.gz"
-          fi
+          # Fix #1: Alpine v3.21 fija (no edge/head -1 que agarraba vintage 2019)
+          ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64"
+          ALPINE_FILE="$(
+            curl -sL "$ALPINE_URL/" |
+            grep -oE 'alpine-minirootfs-[0-9]+\.[0-9]+\.[0-9]+-aarch64\.tar\.gz' |
+            sort -V |
+            tail -1
+          )"
+          [ -z "$ALPINE_FILE" ] && ALPINE_FILE="alpine-minirootfs-3.21.3-aarch64.tar.gz"
           echo "Downloading Alpine rootfs: $ALPINE_FILE"
           wget -q "$ALPINE_URL/$ALPINE_FILE" -O alpine-rootfs.tar.gz || {
             echo "Trying specific version..."
@@ -244,85 +242,88 @@ jobs:
           sudo mount --bind /dev alpine-chroot/dev
           sudo mount --bind /dev/pts alpine-chroot/dev/pts 2>/dev/null || true
 
-      - name: Install pmOS packages in Alpine chroot
+      - name: Copy pmOS binaries into Alpine chroot
         run: |
-          # Add pmOS master repository
-          sudo tee alpine-chroot/etc/apk/repositories > /dev/null << 'REPOS'
-          https://dl-cdn.alpinelinux.org/alpine/edge/main
-          https://dl-cdn.alpinelinux.org/alpine/edge/community
-          https://mirror.postmarketos.org/postmarketos/master/aarch64
-          REPOS
+          # Fix #2: No usamos 'apk add' porque el mirror pmOS no es repo Alpine válido.
+          # Copiamos mkinitfs + assets desde pmos-root (ya extraídos) directamente al chroot.
 
-          # Copy extracted pmOS packages into chroot
-          sudo mkdir -p alpine-chroot/tmp/pmos-root
-          sudo cp -r pmos-root/* alpine-chroot/tmp/pmos-root/
+          # Binario mkinitfs
+          if [ -f pmos-root/usr/sbin/mkinitfs ]; then
+            sudo cp pmos-root/usr/sbin/mkinitfs alpine-chroot/usr/sbin/mkinitfs
+            sudo chmod 755 alpine-chroot/usr/sbin/mkinitfs
+            echo "✅ mkinitfs copied"
+          fi
 
-          # Install base + mkinitfs + pmOS mkinitfs in chroot
+          # Assets mkinitfs (files, dirs, modules lists)
+          if [ -d pmos-root/usr/share/mkinitfs ]; then
+            sudo cp -r pmos-root/usr/share/mkinitfs/* alpine-chroot/usr/share/mkinitfs/ 2>/dev/null || true
+            echo "✅ mkinitfs assets copied"
+          fi
+
+          # Initramfs scripts (init.sh, init_functions.sh, etc.)
+          if [ -d pmos-root/usr/share/initramfs ]; then
+            sudo cp -r pmos-root/usr/share/initramfs/* alpine-chroot/usr/share/initramfs/ 2>/dev/null || true
+            echo "✅ initramfs scripts copied"
+          fi
+
+          # postmarketos-mkinitfs custom hooks
+          if [ -d pmos-root/usr/share/postmarketos-mkinitfs ]; then
+            sudo mkdir -p alpine-chroot/usr/share/postmarketos-mkinitfs
+            sudo cp -r pmos-root/usr/share/postmarketos-mkinitfs/* alpine-chroot/usr/share/postmarketos-mkinitfs/ 2>/dev/null || true
+            echo "✅ pmOS mkinitfs hooks copied"
+          fi
+
+          # Copiar deviceinfo al chroot
+          DI_FILE=$(find pmos-root -name "deviceinfo" -type f 2>/dev/null | head -1)
+          if [ -n "$DI_FILE" ]; then
+            sudo mkdir -p alpine-chroot/etc/deviceinfo
+            sudo cp "$DI_FILE" alpine-chroot/etc/deviceinfo/
+            sudo cp "$DI_FILE" alpine-chroot/tmp/deviceinfo 2>/dev/null || true
+            echo "✅ deviceinfo copied"
+          fi
+
+          # Copiar módulos del kernel al chroot
+          if [ -d pmos-root/lib/modules ]; then
+            sudo cp -r pmos-root/lib/modules/* alpine-chroot/lib/modules/ 2>/dev/null || true
+            echo "✅ modules copied"
+          fi
+
+          echo "=== mkinitfs check in chroot ==="
           sudo chroot alpine-chroot /bin/sh -c '
-            apk update 2>&1 | tail -3
-            apk add --no-cache \
-              alpine-base \
-              busybox \
-              mkinitfs \
-              mkinitfs-doc \
-              postmarketos-mkinitfs \
-              postmarketos-initramfs \
-              postmarketos-base \
-              linux-postmarketos-qcom-sm6125 \
-              device-xiaomi-laurel \
-              2>&1 | tail -10
-          ' || echo "⚠️ Some package installs may have failed, checking state..."
+            echo -n "mkinitfs: "
+            command -v mkinitfs || echo "MISSING"
+            mkinitfs --version 2>&1 || true
+          '
+          echo "=== /lib/modules in chroot ==="
+          sudo ls -la /lib/modules/ 2>/dev/null || echo "(none)"
+          ls alpine-chroot/lib/modules/ 2>/dev/null || echo "(none)"
 
       - name: Generate initramfs
         run: |
-          # Copy kernel modules into chroot (in case they weren't installed properly)
-          if [ -d pmos-root/lib/modules ]; then
-            sudo cp -r pmos-root/lib/modules/* alpine-chroot/lib/modules/ 2>/dev/null || true
-          fi
-
           KVER=$(ls pmos-root/lib/modules/ 2>/dev/null | head -1)
           [ -z "$KVER" ] && KVER=$(ls alpine-chroot/lib/modules/ 2>/dev/null | head -1)
           echo "KVER=$KVER"
-          [ -z "$KVER" ] && { echo "❌ No kernel version"; exit 1; }
+          [ -z "$KVER" ] && { echo "No kernel version"; exit 1; }
 
-          # Ensure device-specific overlay and modules are in place
-          if [ -d pmos-root/usr/share/postmarketos-mkinitfs ]; then
-            sudo cp -r pmos-root/usr/share/postmarketos-mkinitfs/* \
-              alpine-chroot/usr/share/postmarketos-mkinitfs/ 2>/dev/null || true
-          fi
-          if [ -d pmos-root/etc ]; then
-            sudo cp -r pmos-root/etc/* alpine-chroot/etc/ 2>/dev/null || true
-          fi
-          if [ -d pmos-root/usr/share ]; then
-            sudo cp -r pmos-root/usr/share/* alpine-chroot/usr/share/ 2>/dev/null || true
-          fi
-
-          # Configure mkinitfs for pmOS
-          sudo tee alpine-chroot/etc/mkinitfs/mkinitfs.conf > /dev/null << 'MKINIT'
-          # mkinitfs.conf — pmOS style for laurel
-          features="ata base cdrom cryptsetup ext4 kms mmc nvme raid scsi serial squashfs usb virtio"
-          MKINIT
+          sudo mkdir -p alpine-chroot/etc/mkinitfs
+          echo 'features="ata base cdrom cryptsetup ext4 kms mmc nvme raid scsi serial squashfs usb virtio"' | sudo tee alpine-chroot/etc/mkinitfs/mkinitfs.conf > /dev/null
 
           # Generate initramfs
           sudo chroot alpine-chroot /bin/sh -c "
-            echo 'Modules available:'
-            ls /lib/modules/ 2>/dev/null || echo '(none)'
-            
-            # Generate initramfs with mkinitfs
-            mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o /boot/initramfs-laurel \"$KVER\" 2>&1 || {
-              echo 'mkinitfs failed, trying with default config...'
-              mkinitfs -o /boot/initramfs-laurel \"$KVER\" 2>&1
+            echo 'Modules:'
+            ls /lib/modules/
+            mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o /boot/initramfs-laurel $KVER 2>&1 || {
+              echo 'Trying default config...'
+              mkinitfs -o /boot/initramfs-laurel $KVER 2>&1
             }
-            
-            ls -lh /boot/initramfs-laurel 2>/dev/null || echo '❌ initramfs not generated'
+            ls -lh /boot/initramfs-laurel || echo 'initramfs not generated'
           "
 
-          # Copy out initramfs
           if [ -f alpine-chroot/boot/initramfs-laurel ]; then
             cp alpine-chroot/boot/initramfs-laurel artifacts/initramfs
-            echo "✅ Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
+            echo "Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
           else
-            echo "❌ No initramfs generated"
+            echo "No initramfs generated"
             ls -lh alpine-chroot/boot/ 2>/dev/null || echo "(no boot dir)"
           fi
 
@@ -331,83 +332,30 @@ jobs:
       # ============================================================
       - name: Build boot.img
         run: |
-          # Get DTB
-          DTB=$(find artifacts/dtbs -name "*.dtb" | head -1)
+          DTB=$(find artifacts/dtbs -name "*.dtb" | head -1 || true)
           if [ -z "$DTB" ]; then
             DTB=$(find pmos-root -name "*.dtb" | head -1)
             [ -n "$DTB" ] && cp "$DTB" artifacts/dtbs/
           fi
           echo "DTB: $DTB"
 
-          # Get kernel (need uncompressed for mkbootimg on some versions)
-          VMLINUZ="artifacts/vmlinuz"
-
-          # Get initramfs
           INITRAMFS="artifacts/initramfs"
           if [ ! -f "$INITRAMFS" ]; then
-            echo "❌ No initramfs, cannot build boot.img"
+            echo "No initramfs, cannot build boot.img"
             exit 1
           fi
-
-          # Get deviceinfo for boot.img parameters
-          DEVICEINFO="artifacts/deviceinfo"
-          echo "=== Deviceinfo ==="
-          cat "$DEVICEINFO" 2>/dev/null || echo "No deviceinfo"
 
           # Install mkbootimg
           pip3 install mkbootimg 2>/dev/null || true
 
-          # Build cmdline (pmOS style)
+          # Build boot.img using script
           CMDLINE="root=LABEL=pmOS_root rw rootwait console=ttyMSM0,115200 earlycon=msm_serial_dm,0x00a90000 bootopt=64S3,32N2,64N2 androidboot.bootdevice=7824900.sdhci"
+          python3 scripts/build-bootimg.py \
+            artifacts/vmlinuz "$INITRAMFS" "$CMDLINE" \
+            artifacts/boot.img "$DTB" 2>&1
 
-          # Check if DTB is appended or separate
-          # For laurel: deviceinfo says append_dtb="true"
-
-          if [ -f "$DTB" ]; then
-            echo "Appending DTB to kernel (deviceinfo.append_dtb=true)"
-            # Append DTB to kernel (cat kernel + DTB)
-            cat "$VMLINUZ" "$DTB" > /tmp/kernel-dtb.img
-            KERNEL_PATH="/tmp/kernel-dtb.img"
-          else
-            KERNEL_PATH="$VMLINUZ"
-          fi
-
-          python3 -m mkbootimg \
-            --kernel "$KERNEL_PATH" \
-            --ramdisk "$INITRAMFS" \
-            --cmdline "$CMDLINE" \
-            --base 0x00000000 \
-            --kernel_offset 0x00008000 \
-            --ramdisk_offset 0x01000000 \
-            --second_offset 0x00f00000 \
-            --tags_offset 0x00000100 \
-            --pagesize 4096 \
-            --header_version 2 \
-            --os_version 23.0.0 \
-            --os_patch_level 2026-06 \
-            -o artifacts/boot.img 2>&1
-
-          echo "=== boot.img ==="
-          ls -lh artifacts/boot.img || echo "❌ boot.img not created"
-
-          # Verify
-          if [ -f artifacts/boot.img ]; then
-            cat > /tmp/verify-bootimg.py << 'PYEOF'
-            import struct
-            with open('artifacts/boot.img', 'rb') as f:
-                data = f.read(1024)
-            c = data[64:576].rstrip(b'\x00').decode('ascii', 'replace')
-            print(f'Cmdline: {c}')
-            print(f'pmOS_root: {"pmOS_root" in c} \u2705')
-            r_size = struct.unpack('<I', data[16:20])[0]
-            print(f'Ramdisk size: {r_size:,} B')
-            k_size = struct.unpack('<I', data[8:12])[0]
-            print(f'Kernel size: {k_size:,} B')
-            hdr_ver = struct.unpack('<I', data[36:40])[0]
-            print(f'Header version: {hdr_ver}')
-            PYEOF
-            python3 /tmp/verify-bootimg.py
-          fi
+          echo "=== Final boot.img ==="
+          ls -lh artifacts/boot.img || echo "boot.img not created"
 
       - name: Cleanup chroot
         if: always()
