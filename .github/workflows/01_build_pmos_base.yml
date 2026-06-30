@@ -182,24 +182,24 @@ jobs:
             echo "⚠️ No DTB found"
           fi
 
-          # --- DeviceInfo (es directorio en pmOS, no archivo) ---
-          DI_DIR=$(find pmos-root -type d -name "deviceinfo" 2>/dev/null | head -1)
-          if [ -d "$DI_DIR" ]; then
-            # deviceinfo suele estar como subdirectorio con archivo dentro
-            DI_FILE=$(find "$DI_DIR" -maxdepth 1 -type f 2>/dev/null | head -1)
-            if [ -z "$DI_FILE" ]; then
-              # Buscar recursivamente por el archivo deviceinfo
-              DI_FILE=$(find pmos-root -name "deviceinfo" -type f 2>/dev/null | head -1)
-            fi
-          else
-            DI_FILE=$(find pmos-root -name "deviceinfo" -type f 2>/dev/null | head -1)
+          # --- DeviceInfo (para downstream workflow) ---
+          # mkinitfs espera /usr/share/deviceinfo/deviceinfo o /etc/deviceinfo
+          DI_SRC="pmos-root/usr/share/deviceinfo/device-xiaomi-laurel"
+          if [ ! -f "$DI_SRC" ]; then
+            DI_SRC="$(find pmos-root/usr/share/deviceinfo -type f 2>/dev/null | head -1)"
           fi
-          if [ -n "$DI_FILE" ]; then
-            cp "$DI_FILE" artifacts/deviceinfo
+          if [ -n "$DI_SRC" ] && [ -f "$DI_SRC" ]; then
+            cp "$DI_SRC" artifacts/deviceinfo
             echo "=== deviceinfo ==="
             cat artifacts/deviceinfo 2>/dev/null || echo "(empty)"
           else
-            echo "⚠️ deviceinfo not found as file"
+            echo "deviceinfo not found - trying broader search..."
+            DI_FILE=$(find pmos-root -name "deviceinfo" -type f 2>/dev/null | head -1)
+            if [ -n "$DI_FILE" ]; then
+              cp "$DI_FILE" artifacts/deviceinfo
+            else
+              echo "deviceinfo not found as file anywhere"
+            fi
           fi
 
           # ============================================================
@@ -257,12 +257,24 @@ jobs:
             [ -d "pmos-root/usr/share/$dir" ] && sudo cp -a "pmos-root/usr/share/$dir/." "alpine-chroot/usr/share/$dir/" 2>/dev/null || true
           done
 
-          # Device info
-          DI_FILE=$(find pmos-root -name "deviceinfo" -type f 2>/dev/null | head -1)
-          if [ -n "$DI_FILE" ]; then
-            sudo mkdir -p alpine-chroot/etc/deviceinfo
-            sudo cp "$DI_FILE" alpine-chroot/etc/deviceinfo/
+          # Device info — mkinitfs requiere archivo (no directorio) en:
+          # /usr/share/deviceinfo/deviceinfo  o  /etc/deviceinfo
+          DI_SRC="pmos-root/usr/share/deviceinfo/device-xiaomi-laurel"
+          if [ ! -f "$DI_SRC" ]; then
+            DI_SRC="$(find pmos-root/usr/share/deviceinfo -type f | head -1)"
           fi
+          if [ -z "$DI_SRC" ] || [ ! -f "$DI_SRC" ]; then
+            echo "ERROR: no deviceinfo source found"
+            find pmos-root/usr/share/deviceinfo -maxdepth 2 -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "Using deviceinfo: $DI_SRC"
+          sudo mkdir -p alpine-chroot/usr/share/deviceinfo
+          sudo cp "$DI_SRC" alpine-chroot/usr/share/deviceinfo/deviceinfo
+          sudo cp "$DI_SRC" alpine-chroot/etc/deviceinfo
+          echo "=== deviceinfo installed ==="
+          sudo ls -lh alpine-chroot/usr/share/deviceinfo/deviceinfo alpine-chroot/etc/deviceinfo
+          sudo head -10 alpine-chroot/etc/deviceinfo
 
           # Kernel modules — preservar estructura 6.1.0-sm6125/
           sudo mkdir -p alpine-chroot/lib/modules
@@ -284,22 +296,27 @@ jobs:
           echo "KVER=$KVER"
           [ -z "$KVER" ] && { echo "ERROR: no kernel version found"; exit 1; }
 
-          # mkinitfs de pmOS es Go: flags: -d <dir> (default /boot), -no-bootdeploy
-          # NO acepta -c (config) ni -o (output). Kernel version es positional.
+          # mkinitfs de pmOS: flags: -d <dir>, -no-bootdeploy. NO acepta -c ni -o.
           sudo mkdir -p alpine-chroot/boot
           sudo chroot alpine-chroot /bin/sh -c "
             set -eux
             command -v mkinitfs
+            echo '=== deviceinfo check ==='
+            ls -lh /usr/share/deviceinfo/deviceinfo /etc/deviceinfo
+            head -10 /etc/deviceinfo
+            echo '=== modules check ==='
+            ls -lh /lib/modules/$KVER
             ls /lib/modules/ | head -5
-            mkinitfs -d /boot $KVER
-            ls -lh /boot/initramfs-laurel || ls -lh /boot/initramfs-* 2>/dev/null || echo 'checking...'
+            mkinitfs -d /boot -no-bootdeploy $KVER
+            echo '=== boot dir ==='
             ls -lh /boot/
           "
 
-          # Encontrar initramfs generado (mkinitfs nombra initramfs-<kver>)
-          INITRAMFS_FILE=$(sudo ls alpine-chroot/boot/initramfs-* 2>/dev/null | head -1 || true)
+          # Encontrar initramfs (mkinitfs nombra initramfs-<kver>)
+          INITRAMFS_FILE="$(sudo find alpine-chroot/boot -maxdepth 1 -type f -name 'initramfs-*' | head -1 || true)"
           if [ -n "$INITRAMFS_FILE" ] && [ -f "$INITRAMFS_FILE" ]; then
             sudo cp "$INITRAMFS_FILE" artifacts/initramfs
+            sudo chmod 644 artifacts/initramfs
             echo "Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
           else
             echo "No initramfs generated in /boot/"
