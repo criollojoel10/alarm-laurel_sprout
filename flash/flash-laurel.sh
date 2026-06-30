@@ -7,10 +7,10 @@ echo ""
 
 # Check files
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BOOT_IMG="$SCRIPT_DIR/boot-begonia-arch.img"
+BOOT_IMG="$SCRIPT_DIR/boot-laurel-arch.img"
 ROOTFS="$SCRIPT_DIR/rootfs-archlinuxarm-laurel-console.img.xz"
 
-[ ! -f "$BOOT_IMG" ] && { echo "❌ Missing: boot-begonia-arch.img"; exit 1; }
+[ ! -f "$BOOT_IMG" ] && { echo "❌ Missing: boot-laurel-arch.img"; exit 1; }
 [ ! -f "$ROOTFS" ] && { echo "❌ Missing: rootfs-archlinuxarm-laurel-console.img.xz"; exit 1; }
 
 # Decompress rootfs if needed

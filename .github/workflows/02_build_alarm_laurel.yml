@@ -191,11 +191,11 @@ jobs:
 
           if [ -n "$BOOT_IMG" ] && [ -f "$BOOT_IMG" ]; then
             echo "Fixing boot.img cmdline..."
-            python3 scripts/fix-cmdline.py "$BOOT_IMG" boot-begonia-arch.img
+            python3 scripts/fix-cmdline.py "$BOOT_IMG" boot-laurel-arch.img
 
             # Verify
             python3 -c "
-            with open('boot-begonia-arch.img', 'rb') as f:
+            with open('boot-laurel-arch.img', 'rb') as f:
                 data = f.read(1648)
             c = data[64:576].rstrip(b'\x00').decode('ascii', 'replace')
             print('Cmdline after fix:')
@@ -207,7 +207,7 @@ jobs:
             echo "⚠️ No boot.img found. Will try to generate from pmOS packages."
             echo "For first build, please run workflow 01 first."
             # Create a placeholder — user needs to supply boot.img
-            dd if=/dev/zero bs=1M count=32 of=boot-begonia-arch.img 2>/dev/null
+            dd if=/dev/zero bs=1M count=32 of=boot-laurel-arch.img 2>/dev/null
           fi
 
       # ============================================================
@@ -239,7 +239,7 @@ jobs:
           sudo umount mnt 2>/dev/null || true
 
           mkdir -p release
-          mv boot-begonia-arch.img release/
+          mv boot-laurel-arch.img release/
           xz -9 -T 0 -f rootfs.img
           mv rootfs.img.xz release/rootfs-archlinuxarm-laurel-console.img.xz
           [ -f flash/flash-laurel.sh ] && cp flash/flash-laurel.sh release/
@@ -273,7 +273,7 @@ jobs:
             ```
             xz -d rootfs-archlinuxarm-laurel-console.img.xz
             fastboot format:ext4 userdata
-            fastboot flash boot boot-begonia-arch.img
+            fastboot flash boot boot-laurel-arch.img
             fastboot flash userdata rootfs-archlinuxarm-laurel-console.img
             fastboot reboot
             ```
