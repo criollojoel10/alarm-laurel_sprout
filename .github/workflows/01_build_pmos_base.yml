@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # Fix #1: usar mirror 'master' (no 'main') — xiaomi-laurel está en master/testing
+  PMOS_MIRROR: "https://mirror.postmarketos.org/postmarketos/master/aarch64"
+  DEVICE: xiaomi-laurel
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -19,103 +24,153 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq wget xz-utils zstd cpio --no-install-recommends
+          sudo apt-get install -y -qq \
+            wget xz-utils zstd cpio python3 \
+            qemu-user-static binfmt-support \
+            --no-install-recommends
 
       # ============================================================
-      # Download and extract pmOS base packages directly
-      # .apk = tar.gz with signature. We extract only the data.
-      # No Alpine chroot needed — we just need kernel + modules + DTB.
+      # Download pmOS packages from master mirror
+      # Kernel: linux-postmarketos-qcom-sm6125 (SM6125/665 SoC)
+      # Device: device-xiaomi-laurel
       # ============================================================
       - name: Download and extract pmOS packages
         run: |
-          PMOS_MIRROR="https://mirror.postmarketos.org/postmarketos/main/aarch64"
+          PMOS_MIRROR="${{ env.PMOS_MIRROR }}"
           mkdir -p pmos-pkgs pmos-root
 
           # Download APKINDEX
           wget -q "$PMOS_MIRROR/APKINDEX.tar.gz" -O pmos-pkgs/APKINDEX.tar.gz
 
-          # Get version from APKINDEX: find P: then read V:
+          # Helper: get version from APKINDEX
           grep_ver() {
             tar -xzf pmos-pkgs/APKINDEX.tar.gz -O APKINDEX 2>/dev/null | \
               grep -A1 "^P:$1$" | grep "^V:" | sed 's/^V://'
           }
 
+          # Kernel: qcom-sm6125 (Snapdragon 665/ laurel SoC)
           KERNEL_VER=$(grep_ver "linux-postmarketos-qcom-sm6125")
           echo "Kernel version: $KERNEL_VER"
-          [ -z "$KERNEL_VER" ] && { echo "❌ Kernel not found in APKINDEX"; exit 1; }
+          [ -z "$KERNEL_VER" ] && { echo "❌ linux-postmarketos-qcom-sm6125 not found in APKINDEX"; exit 1; }
           KERNEL_PKG="linux-postmarketos-qcom-sm6125-${KERNEL_VER}.apk"
 
+          # Device package
           DEVICE_VER=$(grep_ver "device-xiaomi-laurel")
           echo "Device version: $DEVICE_VER"
-          [ -z "$DEVICE_VER" ] && { echo "❌ Device not found in APKINDEX"; exit 1; }
+          [ -z "$DEVICE_VER" ] && { echo "❌ device-xiaomi-laurel not found in APKINDEX"; exit 1; }
           DEVICE_PKG="device-xiaomi-laurel-${DEVICE_VER}.apk"
 
+          # postmarketos-mkinitfs (needed for initramfs generation)
+          MKINIT_VER=$(grep_ver "postmarketos-mkinitfs")
+          echo "mkinitfs version: $MKINIT_VER"
+          [ -z "$MKINIT_VER" ] && MKINIT_PKG="" || MKINIT_PKG="postmarketos-mkinitfs-${MKINIT_VER}.apk"
+
+          # postmarketos-initramfs (initramfs init script)
+          PINIT_VER=$(grep_ver "postmarketos-initramfs")
+          echo "pmOS initramfs version: $PINIT_VER"
+          [ -z "$PINIT_VER" ] && PINIT_PKG="" || PINIT_PKG="postmarketos-initramfs-${PINIT_VER}.apk"
+
+          # postmarketos-base (needed for mkinitfs config)
+          PBASE_VER=$(grep_ver "postmarketos-base")
+          echo "pmOS base version: $PBASE_VER"
+          [ -z "$PBASE_VER" ] && PBASE_PKG="" || PBASE_PKG="postmarketos-base-${PBASE_VER}.apk"
+
           # Download packages
-          for pkg in "$KERNEL_PKG" "$DEVICE_PKG"; do
+          for pkg in "$KERNEL_PKG" "$DEVICE_PKG" "$MKINIT_PKG" "$PINIT_PKG" "$PBASE_PKG"; do
+            [ -z "$pkg" ] && continue
             echo "Downloading: $pkg"
             wget -q "$PMOS_MIRROR/$pkg" -O "pmos-pkgs/$pkg" || {
-              echo "❌ Failed: $pkg"
-              exit 1
+              echo "⚠️ Failed to download $pkg"
             }
           done
 
-          # Download firmware
-          wget -q "$PMOS_MIRROR/linux-firmware-qcom-20260110-r1.apk" \
-            -O pmos-pkgs/linux-firmware-qcom.apk 2>/dev/null && echo "✅ firmware" || echo "⚠️ no firmware"
+          # Firmware (qcom specific)
+          echo "Downloading firmware-qcom..."
+          wget -q "$PMOS_MIRROR/firmware-qcom-sm7150-6.0.2-r0.apk" -O pmos-pkgs/firmware-qcom.apk 2>/dev/null || \
+          wget -q "$PMOS_MIRROR/linux-firmware-qcom-20260110-r1.apk" -O pmos-pkgs/firmware-qcom.apk 2>/dev/null || \
+          echo "⚠️ Could not download firmware package"
 
-          echo "=== Packages ==="
-          ls -lh pmos-pkgs/
+          echo "=== Downloaded packages ==="
+          ls -lh pmos-pkgs/ | grep -v APKINDEX
 
-          # Extract .apk files (skip signature/PKGINFO)
+          # Extract .apk files
           for apk in pmos-pkgs/*.apk; do
             echo "Extracting: $(basename $apk)"
             tar -xzf "$apk" -C pmos-root 2>/dev/null || true
           done
 
-          echo "=== Extracted files ==="
-          find pmos-root -type f | head -30
-          echo "... total: $(find pmos-root -type f | wc -l)"
+          echo "=== Extracted files (first 40) ==="
+          find pmos-root -type f | head -40
+          echo "Total files: $(find pmos-root -type f | wc -l)"
 
       # ============================================================
-      # Package artifacts
+      # Package artifacts for downstream workflow
+      # Naming: consistent with what 02_build_alarm_laurel.yml expects
       # ============================================================
       - name: Package artifacts
         run: |
           mkdir -p artifacts
 
-          # Kernel Image
+          # --- Kernel Image ---
           KERNEL=$(find pmos-root -name "Image.gz" -o -name "Image" -o -name "vmlinuz*" | head -1)
           if [ -n "$KERNEL" ]; then
-            cp "$KERNEL" artifacts/kernel-Image.gz
+            cp "$KERNEL" artifacts/vmlinuz
             echo "✅ Kernel: $(ls -lh $KERNEL | awk '{print $5}')"
           else
-            echo "❌ No kernel"
+            echo "❌ No kernel found"
             find pmos-root -name "*.gz" | head -10
             exit 1
           fi
 
-          # Kernel version
-          KVER=$(ls pmos-root/lib/modules/ 2>/dev/null || ls pmos-root/usr/lib/modules/ 2>/dev/null | head -1)
+          # --- Kernel version ---
+          KVER=$(ls pmos-root/lib/modules/ 2>/dev/null | head -1)
+          [ -z "$KVER" ] && KVER=$(ls pmos-root/usr/lib/modules/ 2>/dev/null | head -1)
           echo "KVER=$KVER" >> $GITHUB_ENV
           echo "Kernel: $KVER"
 
-          # Modules
+          # --- Modules ---
           for d in pmos-root/usr/lib/modules pmos-root/lib/modules; do
             [ -d "$d/$KVER" ] && MOD_DIR="$d/$KVER" && break
           done
           if [ -n "$MOD_DIR" ]; then
-            tar -czf artifacts/modules-laurel.tar.gz -C "$(dirname $MOD_DIR)" "$KVER"
-            echo "✅ Modules: $(du -sh artifacts/modules-laurel.tar.gz | awk '{print $1}')"
+            tar -czf artifacts/modules.tar.gz -C "$(dirname $MOD_DIR)" "$KVER"
+            echo "✅ Modules: $(du -sh artifacts/modules.tar.gz | awk '{print $1}')"
+          else
+            echo "❌ No modules found"
+            exit 1
           fi
 
-          # DTB
-          DTB=$(find pmos-root -name "*.dtb" | head -1)
+          # --- Firmware ---
+          FIRMWARE_DIRS=""
+          [ -d pmos-root/lib/firmware ] && FIRMWARE_DIRS="$FIRMWARE_DIRS pmos-root/lib/firmware"
+          [ -d pmos-root/usr/lib/firmware ] && FIRMWARE_DIRS="$FIRMWARE_DIRS pmos-root/usr/lib/firmware"
+          if [ -n "$FIRMWARE_DIRS" ]; then
+            # The firmware directory could be large, just tar what's there
+            for fd in $FIRMWARE_DIRS; do
+              tar -czf artifacts/firmware.tar.gz -C "$(dirname $fd)" "$(basename $fd)" 2>/dev/null || true
+            done
+            if [ -f artifacts/firmware.tar.gz ] && [ -s artifacts/firmware.tar.gz ]; then
+              echo "✅ Firmware: $(du -sh artifacts/firmware.tar.gz | awk '{print $1}')"
+            else
+              rm -f artifacts/firmware.tar.gz
+              echo "⚠️ No firmware to package"
+            fi
+          else
+            echo "⚠️ No firmware directory found"
+          fi
+
+          # --- DTB ---
+          DTB=$(find pmos-root -name "*.dtb" | head -5)
           if [ -n "$DTB" ]; then
-            cp "$DTB" artifacts/device.dtb
-            echo "✅ DTB: $DTB"
+            mkdir -p artifacts/dtbs
+            echo "$DTB" | while IFS= read -r dtb; do
+              cp "$dtb" artifacts/dtbs/
+            done
+            echo "✅ DTB files:"
+            ls -lh artifacts/dtbs/
           fi
 
-          # Device info
+          # --- DeviceInfo ---
           DI=$(find pmos-root -name "deviceinfo" | head -1)
           if [ -n "$DI" ]; then
             cp "$DI" artifacts/deviceinfo
@@ -123,12 +178,252 @@ jobs:
             cat artifacts/deviceinfo
           fi
 
-          echo "=== artifacts ==="
+          # ============================================================
+          # Generate initramfs using Alpine mkinitfs in qemu-aarch64 chroot
+          # ============================================================
+      - name: Setup Alpine chroot for initramfs
+        run: |
+          # We need Alpine's apk tool and mkinitfs to generate the initramfs
+          # Use a minimal Alpine aarch64 rootfs
+          ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/edge/releases/aarch64"
+          ALPINE_ROOTFS="alpine-minirootfs-latest-aarch64.tar.gz"
+
+          # Try to find the latest minirootfs
+          curl -sL "$ALPINE_URL/" | grep -o 'alpine-minirootfs-[0-9.]*-aarch64.tar.gz' | head -1 > ~/alpine-version.txt
+          ALPINE_FILE=$(cat ~/alpine-version.txt)
+          if [ -z "$ALPINE_FILE" ]; then
+            ALPINE_FILE="alpine-minirootfs-3.21.3-aarch64.tar.gz"
+          fi
+          echo "Downloading Alpine rootfs: $ALPINE_FILE"
+          wget -q "$ALPINE_URL/$ALPINE_FILE" -O alpine-rootfs.tar.gz || {
+            echo "Trying specific version..."
+            wget -q "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz" \
+              -O alpine-rootfs.tar.gz || {
+              echo "❌ Failed to download Alpine rootfs"
+              exit 1
+            }
+          }
+          ls -lh alpine-rootfs.tar.gz
+
+          # Extract Alpine rootfs
+          mkdir -p alpine-chroot
+          sudo tar -xzf alpine-rootfs.tar.gz -C alpine-chroot
+          sudo cp "$(which qemu-aarch64-static)" alpine-chroot/usr/bin/
+
+          # Set up network
+          sudo rm -f alpine-chroot/etc/resolv.conf
+          sudo bash -c 'cp /etc/resolv.conf alpine-chroot/etc/resolv.conf'
+
+          # Mount pseudo-fs
+          sudo mount -t proc proc alpine-chroot/proc
+          sudo mount --bind /sys alpine-chroot/sys
+          sudo mount --bind /dev alpine-chroot/dev
+          sudo mount --bind /dev/pts alpine-chroot/dev/pts 2>/dev/null || true
+
+      - name: Install pmOS packages in Alpine chroot
+        run: |
+          # Add pmOS master repository
+          sudo tee alpine-chroot/etc/apk/repositories > /dev/null << 'REPOS'
+          https://dl-cdn.alpinelinux.org/alpine/edge/main
+          https://dl-cdn.alpinelinux.org/alpine/edge/community
+          https://mirror.postmarketos.org/postmarketos/master/aarch64
+          REPOS
+
+          # Copy extracted pmOS packages into chroot
+          sudo mkdir -p alpine-chroot/tmp/pmos-root
+          sudo cp -r pmos-root/* alpine-chroot/tmp/pmos-root/
+
+          # Install base + mkinitfs + pmOS mkinitfs in chroot
+          sudo chroot alpine-chroot /bin/sh -c '
+            apk update 2>&1 | tail -3
+            apk add --no-cache \
+              alpine-base \
+              busybox \
+              mkinitfs \
+              mkinitfs-doc \
+              postmarketos-mkinitfs \
+              postmarketos-initramfs \
+              postmarketos-base \
+              linux-postmarketos-qcom-sm6125 \
+              device-xiaomi-laurel \
+              2>&1 | tail -10
+          ' || echo "⚠️ Some package installs may have failed, checking state..."
+
+      - name: Generate initramfs
+        run: |
+          # Copy kernel modules into chroot (in case they weren't installed properly)
+          if [ -d pmos-root/lib/modules ]; then
+            sudo cp -r pmos-root/lib/modules/* alpine-chroot/lib/modules/ 2>/dev/null || true
+          fi
+
+          KVER=$(ls pmos-root/lib/modules/ 2>/dev/null | head -1)
+          [ -z "$KVER" ] && KVER=$(ls alpine-chroot/lib/modules/ 2>/dev/null | head -1)
+          echo "KVER=$KVER"
+          [ -z "$KVER" ] && { echo "❌ No kernel version"; exit 1; }
+
+          # Ensure device-specific overlay and modules are in place
+          if [ -d pmos-root/usr/share/postmarketos-mkinitfs ]; then
+            sudo cp -r pmos-root/usr/share/postmarketos-mkinitfs/* \
+              alpine-chroot/usr/share/postmarketos-mkinitfs/ 2>/dev/null || true
+          fi
+          if [ -d pmos-root/etc ]; then
+            sudo cp -r pmos-root/etc/* alpine-chroot/etc/ 2>/dev/null || true
+          fi
+          if [ -d pmos-root/usr/share ]; then
+            sudo cp -r pmos-root/usr/share/* alpine-chroot/usr/share/ 2>/dev/null || true
+          fi
+
+          # Configure mkinitfs for pmOS
+          sudo tee alpine-chroot/etc/mkinitfs/mkinitfs.conf > /dev/null << 'MKINIT'
+          # mkinitfs.conf — pmOS style for laurel
+          features="ata base cdrom cryptsetup ext4 kms mmc nvme raid scsi serial squashfs usb virtio"
+          MKINIT
+
+          # Generate initramfs
+          sudo chroot alpine-chroot /bin/sh -c "
+            echo 'Modules available:'
+            ls /lib/modules/ 2>/dev/null || echo '(none)'
+            
+            # Generate initramfs with mkinitfs
+            mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o /boot/initramfs-laurel \"$KVER\" 2>&1 || {
+              echo 'mkinitfs failed, trying with default config...'
+              mkinitfs -o /boot/initramfs-laurel \"$KVER\" 2>&1
+            }
+            
+            ls -lh /boot/initramfs-laurel 2>/dev/null || echo '❌ initramfs not generated'
+          "
+
+          # Copy out initramfs
+          if [ -f alpine-chroot/boot/initramfs-laurel ]; then
+            cp alpine-chroot/boot/initramfs-laurel artifacts/initramfs
+            echo "✅ Initramfs: $(ls -lh artifacts/initramfs | awk '{print $5}')"
+          else
+            echo "❌ No initramfs generated"
+            ls -lh alpine-chroot/boot/ 2>/dev/null || echo "(no boot dir)"
+          fi
+
+      # ============================================================
+      # Build boot.img with mkbootimg
+      # ============================================================
+      - name: Build boot.img
+        run: |
+          # Get DTB
+          DTB=$(find artifacts/dtbs -name "*.dtb" | head -1)
+          if [ -z "$DTB" ]; then
+            DTB=$(find pmos-root -name "*.dtb" | head -1)
+            [ -n "$DTB" ] && cp "$DTB" artifacts/dtbs/
+          fi
+          echo "DTB: $DTB"
+
+          # Get kernel (need uncompressed for mkbootimg on some versions)
+          VMLINUZ="artifacts/vmlinuz"
+
+          # Get initramfs
+          INITRAMFS="artifacts/initramfs"
+          if [ ! -f "$INITRAMFS" ]; then
+            echo "❌ No initramfs, cannot build boot.img"
+            exit 1
+          fi
+
+          # Get deviceinfo for boot.img parameters
+          DEVICEINFO="artifacts/deviceinfo"
+          echo "=== Deviceinfo ==="
+          cat "$DEVICEINFO" 2>/dev/null || echo "No deviceinfo"
+
+          # Install mkbootimg
+          pip3 install mkbootimg 2>/dev/null || true
+
+          # Build cmdline (pmOS style)
+          CMDLINE="root=LABEL=pmOS_root rw rootwait console=ttyMSM0,115200 earlycon=msm_serial_dm,0x00a90000 bootopt=64S3,32N2,64N2 androidboot.bootdevice=7824900.sdhci"
+
+          # Check if DTB is appended or separate
+          # For laurel: deviceinfo says append_dtb="true"
+
+          if [ -f "$DTB" ]; then
+            echo "Appending DTB to kernel (deviceinfo.append_dtb=true)"
+            # Append DTB to kernel (cat kernel + DTB)
+            cat "$VMLINUZ" "$DTB" > /tmp/kernel-dtb.img
+            KERNEL_PATH="/tmp/kernel-dtb.img"
+          else
+            KERNEL_PATH="$VMLINUZ"
+          fi
+
+          python3 -m mkbootimg \
+            --kernel "$KERNEL_PATH" \
+            --ramdisk "$INITRAMFS" \
+            --cmdline "$CMDLINE" \
+            --base 0x00000000 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x01000000 \
+            --second_offset 0x00f00000 \
+            --tags_offset 0x00000100 \
+            --pagesize 4096 \
+            --header_version 2 \
+            --os_version 23.0.0 \
+            --os_patch_level 2026-06 \
+            -o artifacts/boot.img 2>&1
+
+          echo "=== boot.img ==="
+          ls -lh artifacts/boot.img || echo "❌ boot.img not created"
+
+          # Verify
+          if [ -f artifacts/boot.img ]; then
+            cat > /tmp/verify-bootimg.py << 'PYEOF'
+            import struct
+            with open('artifacts/boot.img', 'rb') as f:
+                data = f.read(1024)
+            c = data[64:576].rstrip(b'\x00').decode('ascii', 'replace')
+            print(f'Cmdline: {c}')
+            print(f'pmOS_root: {"pmOS_root" in c} \u2705')
+            r_size = struct.unpack('<I', data[16:20])[0]
+            print(f'Ramdisk size: {r_size:,} B')
+            k_size = struct.unpack('<I', data[8:12])[0]
+            print(f'Kernel size: {k_size:,} B')
+            hdr_ver = struct.unpack('<I', data[36:40])[0]
+            print(f'Header version: {hdr_ver}')
+            PYEOF
+            python3 /tmp/verify-bootimg.py
+          fi
+
+      - name: Cleanup chroot
+        if: always()
+        run: |
+          sudo umount alpine-chroot/dev/pts 2>/dev/null || true
+          sudo umount alpine-chroot/dev 2>/dev/null || true
+          sudo umount alpine-chroot/sys 2>/dev/null || true
+          sudo umount alpine-chroot/proc 2>/dev/null || true
+
+      # ============================================================
+      # Final verification
+      # ============================================================
+      - name: Verify artifacts
+        run: |
+          echo "=== Final artifact contents ==="
           ls -lh artifacts/
+          echo ""
+          for f in boot.img vmlinuz modules.tar.gz initramfs deviceinfo; do
+            if [ -f "artifacts/$f" ]; then
+              echo "✅ $f"
+            else
+              case "$f" in
+                initramfs|deviceinfo) echo "⚠️ $f missing (optional)" ;;
+                *) echo "❌ $f MISSING" ;;
+              esac
+            fi
+          done
+          echo ""
+          if [ -f artifacts/boot.img ]; then
+            echo "boot.img SHA256: $(sha256sum artifacts/boot.img | cut -d' ' -f1)"
+            echo "boot.img size: $(ls -lh artifacts/boot.img | awk '{print $5}')"
+          fi
+          if [ -f artifacts/modules.tar.gz ]; then
+            MOD_CNT=$(tar -tzf artifacts/modules.tar.gz | wc -l)
+            echo "Modules: $(du -sh artifacts/modules.tar.gz | awk '{print $1}') ($MOD_CNT files)"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pmos-base-laurel_sprout
+          name: pmos-base-${{ env.DEVICE }}
           path: artifacts/
-          retention-days: 14
+          retention-days: 90

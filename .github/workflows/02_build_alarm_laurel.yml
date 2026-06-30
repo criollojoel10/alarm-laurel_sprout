@@ -120,9 +120,12 @@ jobs:
       # ============================================================
       - name: Inject kernel modules and firmware
         run: |
-          if [ -f pmos-base/modules-${{ env.DEVICE }}.tar.gz ]; then
-            sudo tar -xzf pmos-base/modules-${{ env.DEVICE }}.tar.gz -C mnt/usr/lib/
+          if [ -f pmos-base/modules.tar.gz ]; then
+            sudo tar -xzf pmos-base/modules.tar.gz -C mnt/usr/lib/
             echo "Modules injected from pmOS base artifact"
+          elif [ -f pmos-base/modules-${{ env.DEVICE }}.tar.gz ]; then
+            sudo tar -xzf pmos-base/modules-${{ env.DEVICE }}.tar.gz -C mnt/usr/lib/
+            echo "Modules injected from pmOS base artifact (legacy naming)"
           elif [ -d pmos-boot/lib ]; then
             sudo cp -r pmos-boot/lib/* mnt/usr/lib/ 2>/dev/null || true
             echo "Modules copied from fallback"
