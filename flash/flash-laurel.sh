@@ -34,19 +34,23 @@ read -p "Continue? (y/N): " confirm
 [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && echo "Aborted." && exit 1
 
 echo ""
-echo "=== Step 1: Format userdata ==="
+echo "=== Step 1: Erase dtbo (required for laurel) ==="
+fastboot erase dtbo
+
+echo ""
+echo "=== Step 2: Format userdata ==="
 fastboot format:ext4 userdata
 
 echo ""
-echo "=== Step 2: Flash boot.img ==="
+echo "=== Step 3: Flash boot.img ==="
 fastboot flash boot "$BOOT_IMG"
 
 echo ""
-echo "=== Step 3: Flash rootfs ==="
+echo "=== Step 4: Flash rootfs ==="
 fastboot flash userdata "$ROOTFS"
 
 echo ""
-echo "=== Step 4: Reboot ==="
+echo "=== Step 5: Reboot ===
 fastboot reboot
 
 echo ""
